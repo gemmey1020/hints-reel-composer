@@ -33,6 +33,28 @@ describe("managed media safety", () => {
     await expect(fs.access(upload)).rejects.toThrow();
   });
 
+  it("records official Brand Studio output as provenance metadata on ordinary media", async () => {
+    const { createProject, readProject } = await import("../server/projectStore.ts");
+    const { importUploadedMedia } = await import("../server/media.ts");
+    const project = await createProject("Official motion media");
+    const upload = path.join(root, "official-motion.png");
+    execFileSync("magick", ["-size", "32x32", "xc:#2337ff", upload]);
+    const asset = await importUploadedMedia(project.id, upload, "official-motion.png", "image/png", "official-brand-motion");
+    expect(asset.kind).toBe("image");
+    expect(asset.role).toBe("official-brand-motion");
+    expect((await readProject(project.id)).assets[0].role).toBe("official-brand-motion");
+  });
+
+  it("rejects unsupported media roles without leaving the temporary upload", async () => {
+    const { createProject } = await import("../server/projectStore.ts");
+    const { importUploadedMedia } = await import("../server/media.ts");
+    const project = await createProject("Invalid media role");
+    const upload = path.join(root, "invalid-role.png");
+    execFileSync("magick", ["-size", "16x16", "xc:#74f4ff", upload]);
+    await expect(importUploadedMedia(project.id, upload, "invalid-role.png", "image/png", "logo-builder" as never)).rejects.toThrow(/asset role/i);
+    await expect(fs.access(upload)).rejects.toThrow();
+  });
+
   it("rejects corrupt media transactionally without orphan files", async () => {
     const { createProject, readProject } = await import("../server/projectStore.ts");
     const { importUploadedMedia } = await import("../server/media.ts");

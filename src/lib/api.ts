@@ -1,4 +1,4 @@
-import type { MediaAsset, ReelProject, RenderPreset } from "../../shared/project.ts";
+import type { AssetRole, MediaAsset, ReelProject, RenderPreset } from "../../shared/project.ts";
 
 export interface ProjectSummary {
   id: string;
@@ -18,6 +18,7 @@ export interface RenderJobState {
   outputUrl?: string;
   outputFileName?: string;
   error?: string;
+  failureKind?: "ENCODE_FAILURE" | "QA_EXTRACTION_FAILURE" | "TECHNICAL_QA_FAILURE";
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -48,9 +49,10 @@ export const api = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(project)
   }),
-  importMedia: async (projectId: string, file: File): Promise<{ asset: MediaAsset; project: ReelProject }> => {
+  importMedia: async (projectId: string, file: File, role: AssetRole = "source-media"): Promise<{ asset: MediaAsset; project: ReelProject }> => {
     const form = new FormData();
     form.append("projectId", projectId);
+    form.append("role", role);
     form.append("media", file);
     return requestJson("/api/v1/assets/import", { method: "POST", body: form });
   },

@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { MediaAsset, ReelClip, ReelProject, ReelSequence, RenderPreset } from "../shared/project.js";
+import { isTrackActive, type MediaAsset, type ReelClip, type ReelProject, type ReelSequence, type RenderPreset } from "../shared/project.js";
 import { fontPath, projectFile } from "./paths.js";
 
 export interface RenderCompilation {
@@ -95,15 +95,15 @@ export function keyframeExpression(
   return expressionCall("if", expressionCall("lt", timeVariable, String(number(firstTime))), String(number(keyframes[0].value, fallback)), expression);
 }
 
-function alphaExpression(clip: ReelClip, fps: number): string {
+function alphaExpression(clip: ReelClip, fps: number, timeVariable = "t"): string {
   const start = number(clip.timelineStart);
   const end = start + number(clip.duration, 0.1);
-  const opacity = keyframeExpression(clip, "opacity", Math.max(0, Math.min(1, number(clip.transform.opacity, 1))), fps);
+  const opacity = keyframeExpression(clip, "opacity", Math.max(0, Math.min(1, number(clip.transform.opacity, 1))), fps, timeVariable);
   const fadeIn = Math.max(0, Math.min(number(clip.fadeIn), clip.duration / 2));
   const fadeOut = Math.max(0, Math.min(number(clip.fadeOut), clip.duration / 2));
   let expression = `(${opacity})`;
-  if (fadeOut > 0) expression = `if(gt(t\,${end - fadeOut})\,${opacity}*(${end}-t)/${fadeOut}\,${expression})`;
-  if (fadeIn > 0) expression = `if(lt(t\,${start + fadeIn})\,${opacity}*(t-${start})/${fadeIn}\,${expression})`;
+  if (fadeOut > 0) expression = `if(gt(${timeVariable}\,${end - fadeOut})\,${opacity}*(${end}-${timeVariable})/${fadeOut}\,${expression})`;
+  if (fadeIn > 0) expression = `if(lt(${timeVariable}\,${start + fadeIn})\,${opacity}*(${timeVariable}-${start})/${fadeIn}\,${expression})`;
   return expression;
 }
 
@@ -119,7 +119,7 @@ function videoFilter(indexed: IndexedClip, sequence: ReelSequence, label: string
   const localTimeline = `(t+${number(clip.timelineStart)})`;
   const localAlphaTimeline = `(T+${number(clip.timelineStart)})`;
   const scale = keyframeExpression(clip, "scale", Math.max(0.05, clip.transform.scale), sequence.fps, localTimeline);
-  const opacity = keyframeExpression(clip, "opacity", Math.max(0, Math.min(1, clip.transform.opacity)), sequence.fps, localAlphaTimeline);
+  const opacity = alphaExpression(clip, sequence.fps, localAlphaTimeline);
   const fit = clip.transform.fit === "contain"
     ? `scale=${sequence.width}:${sequence.height}:force_original_aspect_ratio=decrease,pad=${sequence.width}:${sequence.height}:(ow-iw)/2:(oh-ih)/2:color=black@0`
     : `scale=${sequence.width}:${sequence.height}:force_original_aspect_ratio=increase,crop=${sequence.width}:${sequence.height}`;
@@ -135,9 +135,7 @@ function videoFilter(indexed: IndexedClip, sequence: ReelSequence, label: string
       ? `rotate='(${rotation})*PI/180':ow=${rotationIsAnimated ? "hypot(iw\\,ih)" : "rotw(iw)"}:oh=${rotationIsAnimated ? "ow" : "roth(ih)"}:c=none`
       : "null",
     "format=rgba",
-    (clip.keyframes.opacity || []).length > 0
-      ? `geq=r='r(X\,Y)':g='g(X\,Y)':b='b(X\,Y)':a='alpha(X\,Y)*max(0\,min(1\,(${opacity})))'`
-      : `colorchannelmixer=aa=${Math.max(0, Math.min(1, clip.transform.opacity))}`,
+    `geq=r='r(X\,Y)':g='g(X\,Y)':b='b(X\,Y)':a='alpha(X\,Y)*max(0\,min(1\,(${opacity})))'`,
     `setpts=PTS+${number(clip.timelineStart)}/TB`
   ];
   return `[${indexed.inputIndex}:v]${filters.join(",")}[${label}]`;
@@ -204,10 +202,8 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
   const inputArgs: string[] = [];
   const indexed: IndexedClip[] = [];
   const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
-  const enabledTracks = sequence.tracks.filter((track) => !track.hidden);
-  const soloActive = enabledTracks.some((track) => track.solo);
+  const enabledTracks = sequence.tracks.filter((track) => isTrackActive(sequence, track, "visual") || isTrackActive(sequence, track, "audio"));
   for (const track of enabledTracks) {
-    if (soloActive && !track.solo) continue;
     for (const clip of track.clips.filter((candidate) => candidate.enabled && candidate.kind === "media" && candidate.assetId)) {
       const asset = assets.get(clip.assetId!);
       if (!asset) continue;
@@ -223,8 +219,9 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
   let currentVideo = "base0";
   let layerIndex = 0;
   const visualLayers = enabledTracks
+    .filter((track) => isTrackActive(sequence, track, "visual"))
     .flatMap((track) => track.clips.map((clip) => ({ track, clip })))
-    .filter(({ clip }) => clip.enabled && clip.kind !== "brand-motion")
+    .filter(({ clip }) => clip.enabled)
     .sort((a, b) => a.track.order - b.track.order || a.clip.timelineStart - b.clip.timelineStart);
 
   for (const layer of visualLayers) {
@@ -261,7 +258,7 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
   let audioIndex = 0;
   for (const entry of includeAudio ? indexed : []) {
     const track = enabledTracks.find((candidate) => candidate.clips.some((clip) => clip.id === entry.clip.id));
-    if (!entry.asset.hasAudio || track?.muted) continue;
+    if (!entry.asset.hasAudio || !track || !isTrackActive(sequence, track, "audio")) continue;
     const consumedDuration = entry.clip.duration * Math.max(0.05, entry.clip.playbackRate);
     const delay = Math.max(0, Math.round(entry.clip.timelineStart * 1000));
     const fadeIn = Math.max(0, Math.min(entry.clip.fadeIn, entry.clip.duration / 2));
@@ -279,7 +276,10 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
     audioLabels.push(`[${label}]`);
   }
   if (includeAudio && audioLabels.length > 0) {
-    filters.push(`${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:normalize=0,loudnorm=I=${project.renderSettings.loudnessTarget}:TP=${project.renderSettings.truePeak}:LRA=7[aout]`);
+    const normalization = project.renderSettings.normalizeAudio
+      ? `,loudnorm=I=${project.renderSettings.loudnessTarget}:TP=${project.renderSettings.truePeak}:LRA=7`
+      : "";
+    filters.push(`${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:normalize=0${normalization}[aout]`);
   } else if (includeAudio) {
     filters.push(`anullsrc=r=48000:cl=stereo:d=${sequence.duration}[aout]`);
   }

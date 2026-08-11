@@ -16,7 +16,7 @@ interface ClipDrag {
 
 export function Timeline() {
   const {
-    project, sequence, currentTime, selectedClipId, setSelectedClipId, setCurrentTime, updateClip, updateTrack,
+    project, sequence, currentTime, selectedClipId, setSelectedClipId, setCurrentTime, updateClip, toggleTrackFlag,
     splitSelectedClip, duplicateSelectedClip, deleteSelectedClip, addTextToTimeline, addSignalToTimeline,
     undo, redo, canUndo, canRedo
   } = useEditor();
@@ -93,7 +93,7 @@ export function Timeline() {
       <div className="timeline-body" data-help-shift="off">
         <div className="track-headers">
           <div className="ruler-spacer" />
-          {sequence.tracks.map((track, index) => <TrackHeader key={track.id} track={track} label={`${track.kind === "audio" ? "A" : "V"}${track.kind === "audio" ? sequence.tracks.filter((candidate) => candidate.kind === "audio").indexOf(track) + 1 : sequence.tracks.filter((candidate) => candidate.kind !== "audio").length - sequence.tracks.filter((candidate) => candidate.kind !== "audio").indexOf(track)}`} onUpdate={(updater) => updateTrack(track.id, updater)} index={index} />)}
+          {sequence.tracks.map((track) => <TrackHeader key={track.id} track={track} label={`${track.kind === "audio" ? "A" : "V"}${track.kind === "audio" ? sequence.tracks.filter((candidate) => candidate.kind === "audio").indexOf(track) + 1 : sequence.tracks.filter((candidate) => candidate.kind !== "audio").length - sequence.tracks.filter((candidate) => candidate.kind !== "audio").indexOf(track)}`} onToggle={(flag) => toggleTrackFlag(track.id, flag)} />)}
         </div>
         <div className="timeline-scroll">
           <div className="timeline-content" data-help-id="timeline.canvas" style={{ width: contentWidth }} onPointerDown={(event) => {
@@ -136,13 +136,13 @@ export function Timeline() {
   );
 }
 
-function TrackHeader({ track, label, onUpdate }: { track: ReelTrack; label: string; index: number; onUpdate: (updater: (track: ReelTrack) => void) => void }) {
+function TrackHeader({ track, label, onToggle }: { track: ReelTrack; label: string; onToggle: (flag: "locked" | "hidden" | "muted" | "solo") => void }) {
   return <div className={`track-header track-header--${track.kind}`}>
     <strong>{label}</strong>
-    <button data-help-id="timeline.trackLock" title={track.locked ? "Unlock track" : "Lock track"} onClick={() => onUpdate((target) => { target.locked = !target.locked; })}><Icon name={track.locked ? "lock" : "unlock"} /></button>
-    <button data-help-id="timeline.trackVisibility" title={track.hidden ? "Show track" : "Hide track"} onClick={() => onUpdate((target) => { target.hidden = !target.hidden; })}><Icon name={track.hidden ? "eyeOff" : "eye"} /></button>
+    <button data-help-id="timeline.trackLock" title={track.locked ? "Unlock track" : "Lock track"} onClick={() => onToggle("locked")}><Icon name={track.locked ? "lock" : "unlock"} /></button>
+    <button data-help-id="timeline.trackVisibility" title={track.hidden ? "Show track" : "Hide track"} onClick={() => onToggle("hidden")}><Icon name={track.hidden ? "eyeOff" : "eye"} /></button>
     <span>{track.name}</span>
-    <button data-help-id="timeline.trackMute" className={track.muted ? "is-active" : ""} onClick={() => onUpdate((target) => { target.muted = !target.muted; })}>M</button>
-    <button data-help-id="timeline.trackSolo" className={track.solo ? "is-active" : ""} onClick={() => onUpdate((target) => { target.solo = !target.solo; })}>S</button>
+    <button data-help-id="timeline.trackMute" className={track.muted ? "is-active" : ""} onClick={() => onToggle("muted")}>M</button>
+    <button data-help-id="timeline.trackSolo" className={track.solo ? "is-active" : ""} onClick={() => onToggle("solo")}>S</button>
   </div>;
 }

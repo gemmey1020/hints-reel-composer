@@ -29,6 +29,19 @@ export function getClip(project: ReelProject, clipId: string | null): ReelClip |
   return null;
 }
 
+export function mutateClipIfUnlocked(project: ReelProject, clipId: string, updater: (clip: ReelClip) => void): boolean {
+  for (const sequence of project.sequences) {
+    for (const track of sequence.tracks) {
+      const clip = track.clips.find((candidate) => candidate.id === clipId);
+      if (!clip) continue;
+      if (track.locked) return false;
+      updater(clip);
+      return true;
+    }
+  }
+  return false;
+}
+
 export function snapTime(value: number, sequence: ReelSequence, excludedClipId?: string): number {
   const frame = 1 / sequence.fps;
   const frameSnapped = Math.round(value / frame) * frame;
@@ -61,6 +74,16 @@ export function keyframedValue(clip: ReelClip, property: string, localTime: numb
   const right = keyframes[rightIndex];
   const progress = (frame - left.frame) / Math.max(1, right.frame - left.frame);
   return left.value + (right.value - left.value) * ease(progress, right.easing);
+}
+
+export function clipOpacityAtTime(clip: ReelClip, localTime: number, fps: number): number {
+  const opacity = keyframedValue(clip, "opacity", localTime, clip.transform.opacity, fps);
+  const fadeIn = Math.max(0, Math.min(clip.fadeIn, clip.duration / 2));
+  const fadeOut = Math.max(0, Math.min(clip.fadeOut, clip.duration / 2));
+  let fade = 1;
+  if (fadeIn > 0 && localTime < fadeIn) fade = Math.max(0, localTime / fadeIn);
+  if (fadeOut > 0 && localTime > clip.duration - fadeOut) fade = Math.min(fade, Math.max(0, (clip.duration - localTime) / fadeOut));
+  return Math.max(0, Math.min(1, opacity * fade));
 }
 
 export function downloadJson(project: ReelProject): void {

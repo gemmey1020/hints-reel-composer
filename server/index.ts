@@ -83,7 +83,7 @@ app.get("/api/v1/projects/:projectId/export-recipe", async (request, response) =
 app.post("/api/v1/assets/import", upload.single("media"), async (request, response) => {
   if (!request.file) return response.status(400).json({ error: "Media file is required." });
   const projectId = assertSafeId(String(request.body.projectId || ""), "project id");
-  const asset = await importUploadedMedia(projectId, request.file.path, request.file.originalname, request.file.mimetype);
+  const asset = await importUploadedMedia(projectId, request.file.path, request.file.originalname, request.file.mimetype, request.body.role);
   response.status(201).json({ asset, project: await readProject(projectId) });
 });
 

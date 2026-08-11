@@ -2,8 +2,9 @@ export const SCHEMA_VERSION = 1 as const;
 
 export type AspectRatio = "9:16" | "16:9" | "1:1" | "4:5";
 export type AssetKind = "video" | "audio" | "image";
+export type AssetRole = "source-media" | "official-brand-motion";
 export type TrackKind = "video" | "audio" | "graphics";
-export type ClipKind = "media" | "text" | "shape" | "brand-motion";
+export type ClipKind = "media" | "text" | "shape";
 export type FitMode = "cover" | "contain";
 export type RenderPreset = "draft" | "review" | "delivery" | "archive" | "webm" | "gif" | "webp" | "png";
 export type Easing = "linear" | "ease-in" | "ease-out" | "ease-in-out";
@@ -43,6 +44,7 @@ export interface MediaAsset {
   id: string;
   name: string;
   kind: AssetKind;
+  role?: AssetRole;
   fileName: string;
   hash: string;
   duration: number;
@@ -134,8 +136,9 @@ export interface ValidationResult {
 
 const ASPECT_RATIOS = new Set<AspectRatio>(["9:16", "16:9", "1:1", "4:5"]);
 const ASSET_KINDS = new Set<AssetKind>(["video", "audio", "image"]);
+const ASSET_ROLES = new Set<AssetRole>(["source-media", "official-brand-motion"]);
 const TRACK_KINDS = new Set<TrackKind>(["video", "audio", "graphics"]);
-const CLIP_KINDS = new Set<ClipKind>(["media", "text", "shape", "brand-motion"]);
+const CLIP_KINDS = new Set<ClipKind>(["media", "text", "shape"]);
 const RENDER_PRESETS = new Set<RenderPreset>(["draft", "review", "delivery", "archive", "webm", "gif", "webp", "png"]);
 const EASINGS = new Set<Easing>(["linear", "ease-in", "ease-out", "ease-in-out"]);
 const KEYFRAME_PROPERTIES = new Set(["x", "y", "scale", "rotation", "opacity"]);
@@ -383,7 +386,7 @@ export function validateProject(input: unknown): ValidationResult {
         continue;
       }
       rejectUnknownKeys(rawAsset, [
-        "id", "name", "kind", "fileName", "hash", "duration", "width", "height", "fps", "hasAudio",
+        "id", "name", "kind", "role", "fileName", "hash", "duration", "width", "height", "fps", "hasAudio",
         "audioSampleRate", "createdAt", "mediaUrl", "thumbnailUrl", "waveformUrl", "provenance"
       ], path, errors);
       const idValid = requireString(rawAsset.id, `${path}.id`, errors, 1, 128) && SAFE_CHILD_ID.test(rawAsset.id as string);
@@ -396,6 +399,7 @@ export function validateProject(input: unknown): ValidationResult {
       }
       requireString(rawAsset.name, `${path}.name`, errors, 1, 200);
       const kindValid = requireEnum(rawAsset.kind, ASSET_KINDS, `${path}.kind`, errors);
+      if (rawAsset.role !== undefined) requireEnum(rawAsset.role, ASSET_ROLES, `${path}.role`, errors);
       if (typeof rawAsset.fileName !== "string" || !SAFE_FILE_NAME.test(rawAsset.fileName) || rawAsset.fileName.includes("..")) {
         errors.push(`${path}.fileName must be a safe managed file name.`);
       }
@@ -531,7 +535,7 @@ export function validateProject(input: unknown): ValidationResult {
               }
             }
           }
-          if (clipKindValid && (rawClip.kind === "text" || rawClip.kind === "shape" || rawClip.kind === "brand-motion") && trackKindValid && rawTrack.kind !== "graphics") {
+          if (clipKindValid && (rawClip.kind === "text" || rawClip.kind === "shape") && trackKindValid && rawTrack.kind !== "graphics") {
             errors.push(`${clipPath} graphics clips must be on a graphics track.`);
           }
           if (clipKindValid && rawClip.kind === "text") {
@@ -609,6 +613,15 @@ export function validateProject(input: unknown): ValidationResult {
 
 export function getActiveSequence(project: ReelProject): ReelSequence {
   return project.sequences.find((sequence) => sequence.id === project.activeSequenceId) || project.sequences[0];
+}
+
+export type TrackChannel = "visual" | "audio";
+
+export function isTrackActive(sequence: ReelSequence, track: ReelTrack, channel: TrackChannel): boolean {
+  if (track.hidden) return false;
+  if (sequence.tracks.some((candidate) => candidate.solo) && !track.solo) return false;
+  if (channel === "visual") return track.kind !== "audio";
+  return track.kind !== "graphics" && !track.muted;
 }
 
 export function findClip(project: ReelProject, clipId: string): { sequence: ReelSequence; track: ReelTrack; clip: ReelClip } | null {

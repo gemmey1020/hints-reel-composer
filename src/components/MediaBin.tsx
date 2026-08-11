@@ -52,7 +52,7 @@ export function MediaBin() {
           </div>
         )}
         {assets.map((asset) => (
-          <button className="asset-row" data-help-id="media.asset" data-help-label={asset.name} key={asset.id} onDoubleClick={() => addAssetToTimeline(asset)} onClick={() => addAssetToTimeline(asset)}>
+          <button className="asset-row" data-help-id="media.asset" data-help-label={asset.name} key={asset.id} onClick={() => addAssetToTimeline(asset)}>
             <span className={`asset-thumb asset-thumb--${asset.kind}`}>
               {asset.thumbnailUrl ? <img src={asset.thumbnailUrl} alt="" /> : asset.waveformUrl ? <img src={asset.waveformUrl} alt="" /> : <Icon name={asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : "image"} />}
               {asset.duration > 0 && <small>{formatTimecode(asset.duration, asset.fps || 30).slice(0, 5)}</small>}

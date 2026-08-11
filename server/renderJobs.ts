@@ -9,6 +9,30 @@ import { readProject } from "./projectStore.js";
 import { compileRender } from "./renderCompiler.js";
 
 export type RenderStage = "queued" | "compiling" | "rendering" | "qa" | "complete" | "failed" | "cancelled";
+export type RenderFailureKind = "ENCODE_FAILURE" | "QA_EXTRACTION_FAILURE" | "TECHNICAL_QA_FAILURE";
+
+export class RenderPipelineError extends Error {
+  constructor(readonly kind: RenderFailureKind, message: string) {
+    super(message);
+    this.name = "RenderPipelineError";
+  }
+}
+
+export interface QaSample {
+  frame: number;
+  timestamp: number;
+}
+
+export function qaSamplePlan(duration: number, fps: number, frameCount?: number): QaSample[] {
+  const safeFps = Number.isFinite(fps) && fps > 0 ? fps : 1;
+  const derivedCount = Number.isFinite(frameCount) && (frameCount as number) > 0
+    ? Math.max(1, Math.floor(frameCount as number))
+    : Math.max(1, Math.round(Math.max(0, Number.isFinite(duration) ? duration : 0) * safeFps));
+  return [0.15, 0.42, 0.83, 0.95].map((ratio) => {
+    const frame = Math.min(derivedCount - 1, Math.max(0, Math.round((derivedCount - 1) * ratio)));
+    return { frame, timestamp: frame / safeFps };
+  });
+}
 
 export interface RenderJob {
   id: string;
@@ -22,6 +46,7 @@ export interface RenderJob {
   outputUrl?: string;
   outputFileName?: string;
   error?: string;
+  failureKind?: RenderFailureKind;
 }
 
 interface InternalJob extends RenderJob {
@@ -116,7 +141,8 @@ export class RenderJobManager {
     } catch (error) {
       if (job.stage === "cancelled") return;
       const message = error instanceof Error ? error.message : String(error);
-      this.update(job, { stage: "failed", message: "Render failed", error: message });
+      const failureKind = error instanceof RenderPipelineError ? error.kind : undefined;
+      this.update(job, { stage: "failed", message: "Render failed", error: message, failureKind });
     }
   }
 
@@ -145,13 +171,13 @@ export class RenderJobManager {
         stderr += chunk;
         if (stderr.length > 2_000_000) stderr = stderr.slice(-2_000_000);
       });
-      child.on("error", reject);
+      child.on("error", (error) => reject(new RenderPipelineError("ENCODE_FAILURE", error.message)));
       child.on("close", async (code) => {
         await fs.writeFile(projectFile(job.projectId, "logs", `${job.id}-ffmpeg.log`), stderr, "utf8").catch(() => undefined);
         job.process = undefined;
         if (job.stage === "cancelled") return resolve();
         if (code === 0) resolve();
-        else reject(new Error(stderr.split("\n").filter(Boolean).slice(-8).join("\n") || `FFmpeg exited with code ${code}.`));
+        else reject(new RenderPipelineError("ENCODE_FAILURE", stderr.split("\n").filter(Boolean).slice(-8).join("\n") || `FFmpeg exited with code ${code}.`));
       });
     });
   }
@@ -166,12 +192,12 @@ export class RenderJobManager {
       let stderr = "";
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-      child.on("error", reject);
+      child.on("error", (error) => reject(new RenderPipelineError("ENCODE_FAILURE", error.message)));
       child.on("close", (code) => {
         job.process = undefined;
         if (job.stage === "cancelled") return resolve();
         if (code === 0) resolve();
-        else reject(new Error(stderr || `zip exited with code ${code}.`));
+        else reject(new RenderPipelineError("ENCODE_FAILURE", stderr || `zip exited with code ${code}.`));
       });
     });
   }
@@ -179,65 +205,107 @@ export class RenderJobManager {
   private async runQa(job: InternalJob, outputPath: string, duration: number, fps: number, frameDirectory?: string): Promise<void> {
     const qaDir = projectFile(job.projectId, "qa", job.id);
     await fs.mkdir(qaDir, { recursive: true });
-    const timestamps = [0.15, 0.42, 0.83, 0.95].map((ratio) => Math.max(0, duration * ratio));
+    const runCapture = (tool: string, args: string[], kind: RenderFailureKind, label: string): Promise<{ stdout: string; stderr: string }> => new Promise((resolve, reject) => {
+      const child = spawn(tool, args, { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      child.on("error", (error) => reject(new RenderPipelineError(kind, `${label}: ${error.message}`)));
+      child.on("close", (code) => code === 0
+        ? resolve({ stdout, stderr })
+        : reject(new RenderPipelineError(kind, `${label}: ${stderr.trim() || `${tool} exited with code ${code}.`}`)));
+    });
+    const parseRate = (value?: string): number => {
+      if (!value) return 0;
+      const [numerator, denominator = "1"] = value.split("/");
+      const result = Number(numerator) / Number(denominator);
+      return Number.isFinite(result) && result > 0 ? result : 0;
+    };
+    type QaProbe = {
+      streams?: Array<{
+        codec_type?: string;
+        width?: number;
+        height?: number;
+        avg_frame_rate?: string;
+        r_frame_rate?: string;
+        nb_frames?: string;
+        nb_read_frames?: string;
+        sample_rate?: string;
+        channels?: number;
+      }>;
+      format?: { duration?: string; size?: string; bit_rate?: string };
+    };
+    const probeTarget = async (target: string, countFrames = false): Promise<{ raw: string; parsed: QaProbe }> => {
+      const { stdout } = await runCapture("ffprobe", [
+        "-v", "error",
+        ...(countFrames ? ["-count_frames"] : []),
+        "-show_streams", "-show_format", "-of", "json", target
+      ], "TECHNICAL_QA_FAILURE", "FFprobe QA failed");
+      try {
+        return { raw: stdout, parsed: JSON.parse(stdout) as QaProbe };
+      } catch {
+        throw new RenderPipelineError("TECHNICAL_QA_FAILURE", "FFprobe QA returned malformed JSON.");
+      }
+    };
+
     const framePaths: string[] = [];
     const isAnimatedWebp = path.extname(outputPath).toLowerCase() === ".webp";
-    let derivedFrameCount: number | undefined;
+    let actualDuration = duration;
+    let actualFps = fps;
+    let actualFrameCount = 0;
+    let sourceFrames: string[] = [];
+    let outputProbe: { raw: string; parsed: QaProbe } | undefined;
     if (frameDirectory) {
-      const sourceFrames = (await fs.readdir(frameDirectory)).filter((file) => file.endsWith(".png")).sort();
-      if (sourceFrames.length === 0) throw new Error("PNG sequence did not produce frames.");
-      derivedFrameCount = sourceFrames.length;
-      for (const [index, ratio] of [0.15, 0.42, 0.83, 0.95].entries()) {
-        const sourceIndex = Math.min(sourceFrames.length - 1, Math.round((sourceFrames.length - 1) * ratio));
-        const framePath = path.join(qaDir, `frame-${index + 1}.png`);
-        framePaths.push(framePath);
-        await fs.copyFile(path.join(frameDirectory, sourceFrames[sourceIndex]), framePath);
-      }
+      sourceFrames = (await fs.readdir(frameDirectory)).filter((file) => file.endsWith(".png")).sort();
+      actualFrameCount = sourceFrames.length;
+      actualFps = Number.isFinite(fps) && fps > 0 ? fps : 1;
+      actualDuration = actualFrameCount / actualFps;
     } else if (isAnimatedWebp) {
-      derivedFrameCount = await new Promise<number>((resolve, reject) => {
-        const child = spawn("magick", ["identify", "-format", "%n\n", outputPath]);
-        let stdout = "";
-        child.stdout.setEncoding("utf8");
-        child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-        child.on("error", reject);
-        child.on("close", (code) => code === 0 ? resolve(Number(stdout.trim().split("\n")[0])) : reject(new Error("Animated WebP frame count failed.")));
-      });
-      if (!derivedFrameCount) throw new Error("Animated WebP did not contain frames.");
-      for (const [index, ratio] of [0.15, 0.42, 0.83, 0.95].entries()) {
-        const sourceIndex = Math.min(derivedFrameCount - 1, Math.round((derivedFrameCount - 1) * ratio));
-        const framePath = path.join(qaDir, `frame-${index + 1}.png`);
-        framePaths.push(framePath);
-        const deletionArgs = sourceIndex > 0 ? ["-delete", `0-${sourceIndex - 1}`] : [];
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn("magick", [outputPath, "-coalesce", ...deletionArgs, "-delete", "1--1", framePath]);
-          child.on("error", reject);
-          child.on("close", (code) => code === 0 ? resolve() : reject(new Error("Animated WebP QA frame extraction failed.")));
-        });
-      }
+      const { stdout } = await runCapture("magick", ["identify", "-format", "%T\n", outputPath], "TECHNICAL_QA_FAILURE", "Animated WebP timing inspection failed");
+      const delays = stdout.split("\n").filter((value) => value.trim() !== "").map(Number).filter((value) => Number.isFinite(value) && value >= 0);
+      actualFrameCount = delays.length;
+      actualDuration = delays.reduce((sum, value) => sum + value, 0) / 100;
+      if (!(actualDuration > 0)) actualDuration = duration;
+      actualFps = actualFrameCount > 0 && actualDuration > 0 ? actualFrameCount / actualDuration : fps;
     } else {
-      for (const [index, timestamp] of timestamps.entries()) {
-        const framePath = path.join(qaDir, `frame-${index + 1}.jpg`);
-        framePaths.push(framePath);
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn("ffmpeg", [
-            "-hide_banner", "-loglevel", "error", "-y", "-ss", String(timestamp), "-i", outputPath,
-            "-frames:v", "1", "-q:v", "2", framePath
-          ]);
-          child.on("error", reject);
-          child.on("close", (code) => code === 0 ? resolve() : reject(new Error("QA frame extraction failed.")));
-        });
+      outputProbe = await probeTarget(outputPath, true);
+      const video = outputProbe.parsed.streams?.find((stream) => stream.codec_type === "video");
+      actualDuration = Number(outputProbe.parsed.format?.duration || duration);
+      actualFps = parseRate(video?.avg_frame_rate) || parseRate(video?.r_frame_rate) || fps;
+      const reportedFrames = Number(video?.nb_read_frames || video?.nb_frames || 0);
+      actualFrameCount = Number.isFinite(reportedFrames) && reportedFrames > 0
+        ? Math.floor(reportedFrames)
+        : Math.max(1, Math.round(actualDuration * actualFps));
+    }
+
+    if (actualFrameCount < 1) throw new RenderPipelineError("TECHNICAL_QA_FAILURE", "Rendered output did not contain an extractable frame.");
+    const samples = qaSamplePlan(actualDuration, actualFps, actualFrameCount);
+    for (const [index, sample] of samples.entries()) {
+      const framePath = path.join(qaDir, `frame-${index + 1}.${frameDirectory || isAnimatedWebp ? "png" : "jpg"}`);
+      framePaths.push(framePath);
+      if (frameDirectory) {
+        try {
+          await fs.copyFile(path.join(frameDirectory, sourceFrames[sample.frame]), framePath);
+        } catch (error) {
+          throw new RenderPipelineError("QA_EXTRACTION_FAILURE", `PNG sequence frame ${sample.frame} could not be copied: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else if (isAnimatedWebp) {
+        const deletionArgs = sample.frame > 0 ? ["-delete", `0-${sample.frame - 1}`] : [];
+        const trailingDeletionArgs = sample.frame < actualFrameCount - 1 ? ["-delete", "1--1"] : [];
+        await runCapture("magick", [outputPath, "-coalesce", ...deletionArgs, ...trailingDeletionArgs, framePath], "QA_EXTRACTION_FAILURE", `Animated WebP frame ${sample.frame} extraction failed`);
+      } else {
+        await runCapture("ffmpeg", [
+          "-hide_banner", "-loglevel", "error", "-y", "-i", outputPath,
+          "-vf", `select=eq(n\\,${sample.frame})`, "-vsync", "0", "-frames:v", "1", "-q:v", "2", framePath
+        ], "QA_EXTRACTION_FAILURE", `QA frame ${sample.frame} extraction failed`);
       }
     }
-    const probeTarget = frameDirectory || isAnimatedWebp ? framePaths[0] : outputPath;
-    const probe = await new Promise<string>((resolve, reject) => {
-      const child = spawn("ffprobe", ["-v", "error", "-show_streams", "-show_format", "-of", "json", probeTarget]);
-      let stdout = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-      child.on("error", reject);
-      child.on("close", (code) => code === 0 ? resolve(stdout) : reject(new Error("FFprobe QA failed.")));
-    });
-    await fs.writeFile(path.join(qaDir, "ffprobe.json"), probe, "utf8");
+
+    const technicalProbe = outputProbe || await probeTarget(framePaths[0]);
+    await fs.writeFile(path.join(qaDir, "ffprobe.json"), technicalProbe.raw, "utf8");
 
     await new Promise<void>((resolve) => {
       const child = spawn("magick", [
@@ -262,10 +330,7 @@ export class RenderJobManager {
       child.on("close", () => resolve(stderr.split("\n").slice(-40).join("\n")));
     });
 
-    const parsedProbe = JSON.parse(probe) as {
-      streams?: Array<{ codec_type?: string; width?: number; height?: number; avg_frame_rate?: string; sample_rate?: string; channels?: number }>;
-      format?: { duration?: string; size?: string; bit_rate?: string };
-    };
+    const parsedProbe = technicalProbe.parsed;
     const video = parsedProbe.streams?.find((stream) => stream.codec_type === "video");
     const audio = parsedProbe.streams?.find((stream) => stream.codec_type === "audio");
     const qaReport = {
@@ -273,27 +338,31 @@ export class RenderJobManager {
       renderJobId: job.id,
       inspectedAt: new Date().toISOString(),
       outputFile: path.basename(outputPath),
-      frameSamples: timestamps.map((timestamp, index) => ({ timestamp, file: path.basename(framePaths[index]) })),
+      frameSamples: samples.map((sample, index) => ({ ...sample, file: path.basename(framePaths[index]) })),
       contactSheet: "contact-sheet.jpg",
       technical: {
         width: video?.width,
         height: video?.height,
         averageFrameRate: video?.avg_frame_rate,
-        duration: frameDirectory || isAnimatedWebp ? String(duration) : parsedProbe.format?.duration,
+        duration: String(actualDuration),
         bytes: frameDirectory || isAnimatedWebp ? String((await fs.stat(outputPath)).size) : parsedProbe.format?.size,
         bitrate: parsedProbe.format?.bit_rate,
         audioSampleRate: audio?.sample_rate,
         audioChannels: audio?.channels,
-        derivedFrameCount
+        actualFrameCount
       },
       checks: {
-        durationPresent: frameDirectory || isAnimatedWebp ? duration > 0 : Number(parsedProbe.format?.duration || 0) > 0,
+        durationPresent: actualDuration > 0,
         dimensionsPresent: Boolean(video?.width && video?.height),
-        frameRatePresent: frameDirectory || isAnimatedWebp ? derivedFrameCount === Math.round(duration * fps) : Boolean(video?.avg_frame_rate),
+        frameRatePresent: actualFps > 0 && actualFrameCount > 0,
+        sampleFramesPresent: framePaths.length === samples.length,
         audioPresent: frameDirectory || isAnimatedWebp ? "not-applicable" : Boolean(audio)
       },
       audioAnalysis
     };
     await fs.writeFile(path.join(qaDir, "qa-report.json"), `${JSON.stringify(qaReport, null, 2)}\n`, "utf8");
+    if (!qaReport.checks.durationPresent || !qaReport.checks.dimensionsPresent || !qaReport.checks.frameRatePresent || !qaReport.checks.sampleFramesPresent) {
+      throw new RenderPipelineError("TECHNICAL_QA_FAILURE", "Rendered output failed technical QA invariants.");
+    }
   }
 }

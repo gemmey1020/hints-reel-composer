@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Response } from "express";
-import type { MediaAsset, AssetKind } from "../shared/project.js";
+import type { MediaAsset, AssetKind, AssetRole } from "../shared/project.js";
 import { projectFile, resolveExistingProjectFile, resolveProjectWriteFile } from "./paths.js";
 import { readProject, writeProject } from "./projectStore.js";
 
@@ -102,10 +102,23 @@ async function createPreviewArtifacts(projectId: string, asset: MediaAsset, file
   }
 }
 
-export async function importUploadedMedia(projectId: string, temporaryPath: string, originalName: string, mime: string): Promise<MediaAsset> {
+export function parseAssetRole(value: unknown): AssetRole {
+  if (value === undefined || value === "" || value === "source-media") return "source-media";
+  if (value === "official-brand-motion") return value;
+  throw new MediaInputError("Asset role must be source-media or official-brand-motion.");
+}
+
+export async function importUploadedMedia(
+  projectId: string,
+  temporaryPath: string,
+  originalName: string,
+  mime: string,
+  roleInput: unknown = "source-media"
+): Promise<MediaAsset> {
   let destination: string | undefined;
   let assetId: string | undefined;
   try {
+    const role = parseAssetRole(roleInput);
     const uploadStats = await fs.lstat(temporaryPath);
     if (uploadStats.isSymbolicLink()) throw new MediaInputError("Media upload cannot be a symbolic link.");
     if (!uploadStats.isFile()) throw new MediaInputError("Media upload must be a regular file.");
@@ -139,6 +152,7 @@ export async function importUploadedMedia(projectId: string, temporaryPath: stri
       id: assetId,
       name: path.parse(originalName).name.slice(0, 200) || "media",
       kind,
+      role,
       fileName,
       hash,
       duration: Number(metadata.format?.duration || (kind === "image" ? 4 : 0)),

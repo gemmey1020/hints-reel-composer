@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import type { MediaAsset, ReelClip } from "../../shared/project.ts";
-import { formatTimecode, keyframedValue } from "../lib/editor.ts";
+import { isTrackActive, type MediaAsset, type ReelClip } from "../../shared/project.ts";
+import { clipOpacityAtTime, formatTimecode, keyframedValue } from "../lib/editor.ts";
 import { useEditor } from "../state/EditorContext.tsx";
 import { Icon } from "./Icon.tsx";
 
@@ -38,11 +38,10 @@ export function PreviewStage() {
   if (!project || !sequence) return null;
   const scaleFactor = Math.min(stageSize.width / sequence.width, stageSize.height / sequence.height);
   const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
-  const soloActive = sequence.tracks.some((track) => track.solo);
   const activeLayers = sequence.tracks
-    .filter((track) => !track.hidden && (!soloActive || track.solo))
+    .filter((track) => isTrackActive(sequence, track, "visual"))
     .flatMap((track) => track.clips.map((clip) => ({ clip, order: track.order })))
-    .filter(({ clip }) => clip.enabled && clip.kind !== "brand-motion" && currentTime >= clip.timelineStart && currentTime < clip.timelineStart + clip.duration)
+    .filter(({ clip }) => clip.enabled && currentTime >= clip.timelineStart && currentTime < clip.timelineStart + clip.duration)
     .sort((a, b) => a.order - b.order);
 
   const startDrag = (event: ReactPointerEvent, clip: ReelClip) => {
@@ -85,7 +84,7 @@ export function PreviewStage() {
             const localTime = currentTime - clip.timelineStart;
             const x = keyframedValue(clip, "x", localTime, clip.transform.x, sequence.fps);
             const y = keyframedValue(clip, "y", localTime, clip.transform.y, sequence.fps);
-            const opacity = keyframedValue(clip, "opacity", localTime, clip.transform.opacity, sequence.fps);
+            const opacity = clipOpacityAtTime(clip, localTime, sequence.fps);
             const scale = keyframedValue(clip, "scale", localTime, clip.transform.scale, sequence.fps);
             const rotation = keyframedValue(clip, "rotation", localTime, clip.transform.rotation, sequence.fps);
             const selected = clip.id === selectedClipId;

@@ -91,5 +91,7 @@ trusted adapters or a dedicated finishing application rather than embedding
 free-form shell commands in a Recipe.
 
 Official Hints identity motion must be rendered by Hints Brand Studio and then
-imported here as a managed Brand Motion Clip. Reel Composer never reconstructs
-the official wordmark internally.
+imported here as an ordinary managed media asset with the optional
+`official-brand-motion` role. That role records provenance only: trimming,
+positioning, and composition remain ordinary media operations, and Reel
+Composer never reconstructs the official wordmark internally.
