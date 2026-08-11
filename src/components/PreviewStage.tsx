@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { isTrackActive, type MediaAsset, type ReelClip } from "../../shared/project.ts";
-import { clipOpacityAtTime, formatTimecode, keyframedValue } from "../lib/editor.ts";
+import { clipOpacityAtTime, formatTimecode, keyframedValue, previewTextFontSize } from "../lib/editor.ts";
 import { useEditor } from "../state/EditorContext.tsx";
 import { Icon } from "./Icon.tsx";
 
@@ -68,7 +68,11 @@ export function PreviewStage() {
 
   return (
     <section className="preview-panel" data-help-id="preview.panel">
-      <div className="preview-heading"><strong>Preview</strong><span>{sequence.width}×{sequence.height} · {sequence.aspectRatio}</span></div>
+      <div className="preview-heading">
+        <strong>Preview</strong>
+        <span className="preview-authority">Final render is delivery authority</span>
+        <span>{sequence.width}×{sequence.height} · {sequence.aspectRatio}</span>
+      </div>
       <div className="preview-workspace" onClick={() => setSelectedClipId(null)}>
         <div
           ref={stageRef}
@@ -127,17 +131,19 @@ export function PreviewStage() {
                     color: clip.textStyle.color,
                     fontFamily: clip.textStyle.fontFamily,
                     fontWeight: clip.textStyle.fontWeight,
-                    fontSize: `${clip.textStyle.fontSize * scaleFactor}px`,
+                    fontSize: `${previewTextFontSize(clip.textStyle.fontSize, sequence.height, scaleFactor)}px`,
                     lineHeight: clip.textStyle.lineHeight,
-                    letterSpacing: `${clip.textStyle.letterSpacing * scaleFactor}px`,
+                    letterSpacing: 0,
                     textAlign: clip.textStyle.align,
                     direction: clip.textStyle.direction,
-                    WebkitTextStroke: `${clip.textStyle.strokeWidth * scaleFactor}px ${clip.textStyle.strokeColor}`,
-                    textShadow: `0 ${Math.max(1, clip.textStyle.shadowBlur / 3) * scaleFactor}px ${clip.textStyle.shadowBlur * scaleFactor}px ${clip.textStyle.shadowColor}`
+                    unicodeBidi: "plaintext",
+                    whiteSpace: "pre",
+                    WebkitTextStroke: `${clip.textStyle.strokeWidth * (sequence.height / 1920) * scaleFactor}px ${clip.textStyle.strokeColor}`,
+                    textShadow: `0 ${Math.max(1, clip.textStyle.shadowBlur / 3) * (sequence.height / 1920) * scaleFactor}px ${clip.textStyle.shadowBlur * (sequence.height / 1920) * scaleFactor}px ${clip.textStyle.shadowColor}`
                   }}
                   onPointerDown={(event) => startDrag(event, clip)} onPointerMove={moveDrag} onPointerUp={endDrag}
                 >
-                  {clip.text?.split("\n").map((line, index) => <div key={`${line}-${index}`}>{line || "\u00a0"}</div>)}
+                  {clip.text || ""}
                   {selected && <SelectionFrame label={clip.name} />}
                 </div>
               );
@@ -153,8 +159,7 @@ export function PreviewStage() {
                     ...baseStyle,
                     width: clip.shape.width * scaleFactor,
                     height: Math.max(1, clip.shape.height * scaleFactor),
-                    background: clip.shape.color,
-                    boxShadow: `0 0 ${10 * scaleFactor}px ${clip.shape.color}55`
+                    background: clip.shape.color
                   }}
                   onPointerDown={(event) => startDrag(event, clip)} onPointerMove={moveDrag} onPointerUp={endDrag}
                 >{selected && <SelectionFrame label={clip.name} />}</div>

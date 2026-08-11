@@ -73,6 +73,11 @@ modify the experiment source folder.
 - Synchronized visual editor and validated JSON Recipe drawer.
 - Native FFmpeg draft, review, delivery, ProRes, WebM, palette GIF, animated WebP, and zipped PNG-sequence renders.
 - Hints Guide Mode with on-demand info markers, Arabic ghost cards, `?` toggle, and `Shift + Click` quick help outside the Timeline.
+- Governed Preview to Export parity contract with a local Chrome/FFmpeg/ImageMagick golden suite. See [`docs/PREVIEW_EXPORT_PARITY.md`](docs/PREVIEW_EXPORT_PARITY.md).
+
+The Preview is an operator surface. Final FFmpeg render is visibly identified
+as the delivery authority wherever bounded typography rasterization differences
+remain.
 
 The original Hints Brand Studio remains the canonical official identity-motion
 workspace. Reel Composer does not redraw or replace the logo system.

@@ -51,7 +51,9 @@ export function Inspector() {
               <label className="inspector-control" data-help-id="inspector.font"><span>Font</span><select value={selectedClip.textStyle.fontFamily} onChange={(event) => patchStyle("fontFamily", event.target.value)}><option>Bomstad Display</option><option>Hakira</option><option>Tajawal</option></select></label>
               <label className="inspector-control" data-help-id="inspector.weight"><span>Weight</span><select value={selectedClip.textStyle.fontWeight} onChange={(event) => patchStyle("fontWeight", Number(event.target.value))}>{[400, 500, 600, 700, 800].map((weight) => <option key={weight}>{weight}</option>)}</select></label>
               <NumberControl label="Font size" helpId="inspector.fontSize" value={selectedClip.textStyle.fontSize} min={8} max={400} onChange={(value) => patchStyle("fontSize", value)} />
-              <NumberControl label="Tracking" helpId="inspector.tracking" value={selectedClip.textStyle.letterSpacing} step={0.1} onChange={(value) => patchStyle("letterSpacing", value)} />
+              <NumberControl label="Line height" helpId="inspector.lineHeight" value={selectedClip.textStyle.lineHeight} step={0.05} min={0.5} max={4} onChange={(value) => patchStyle("lineHeight", value)} />
+              <label className="inspector-control" data-help-id="inspector.textAlign"><span>Alignment</span><select value={selectedClip.textStyle.align} onChange={(event) => patchStyle("align", event.target.value)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+              <label className="inspector-control" data-help-id="inspector.textDirection"><span>Direction</span><select value={selectedClip.textStyle.direction} onChange={(event) => patchStyle("direction", event.target.value)}><option value="ltr">LTR</option><option value="rtl">RTL</option></select></label>
               <ColorControl label="Color" helpId="inspector.textColor" value={selectedClip.textStyle.color} onChange={(value) => patchStyle("color", value)} />
             </>}
           </section>}

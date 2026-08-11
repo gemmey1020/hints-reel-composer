@@ -86,6 +86,10 @@ export function clipOpacityAtTime(clip: ReelClip, localTime: number, fps: number
   return Math.max(0, Math.min(1, opacity * fade));
 }
 
+export function previewTextFontSize(fontSize: number, sequenceHeight: number, stageScale: number): number {
+  return fontSize * (sequenceHeight / 1920) * stageScale;
+}
+
 export function downloadJson(project: ReelProject): void {
   const blob = new Blob([`${JSON.stringify(project, null, 2)}\n`], { type: "application/json" });
   const url = URL.createObjectURL(blob);

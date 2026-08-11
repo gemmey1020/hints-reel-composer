@@ -141,43 +141,75 @@ function videoFilter(indexed: IndexedClip, sequence: ReelSequence, label: string
   return `[${indexed.inputIndex}:v]${filters.join(",")}[${label}]`;
 }
 
-function textFilter(input: string, output: string, clip: ReelClip, sequence: ReelSequence): string {
+function textFilters(input: string, output: string, clip: ReelClip, sequence: ReelSequence, layerIndex: number): string[] {
   const style = clip.textStyle;
-  if (!style) return `[${input}]null[${output}]`;
+  if (!style) return [`[${input}]null[${output}]`];
   const start = number(clip.timelineStart);
   const end = start + number(clip.duration, 0.1);
-  const x = `(w-text_w)/2+(${keyframeExpression(clip, "x", clip.transform.x, sequence.fps)})`;
-  const y = `(h-text_h)/2+(${keyframeExpression(clip, "y", clip.transform.y, sequence.fps)})`;
+  const localTime = `(t+${start})`;
+  const x = keyframeExpression(clip, "x", clip.transform.x, sequence.fps);
+  const y = keyframeExpression(clip, "y", clip.transform.y, sequence.fps);
   const baseSize = Math.max(8, style.fontSize * (sequence.height / 1920));
-  const scaledSize = expressionCall("max", "8", `${number(baseSize)}*(${keyframeExpression(clip, "scale", clip.transform.scale, sequence.fps)})`);
+  const scaledSize = expressionCall("max", "8", `${number(baseSize)}*(${keyframeExpression(clip, "scale", clip.transform.scale, sequence.fps, localTime)})`);
+  const titleMargin = Math.round(sequence.width * 0.06);
+  const textX = style.align === "left" ? String(titleMargin) : style.align === "right" ? `w-${titleMargin}-text_w` : "(w-text_w)/2";
+  const alignment = style.align === "left" ? "L" : style.align === "right" ? "R" : "C";
+  const lineSpacing = Math.round(baseSize * (style.lineHeight - 1));
+  const unitScale = sequence.height / 1920;
+  const source = `textsrc${layerIndex}`;
+  const drawn = `textdraw${layerIndex}`;
+  const rotated = `textrot${layerIndex}`;
   const options = [
     `fontfile='${fontPath(style.fontFamily, style.fontWeight)}'`,
     `text='${escapeDrawText(clip.text || "")}'`,
     `fontcolor=${ffColor(style.color)}`,
     `fontsize='${scaledSize}'`,
-    `x='${x}'`,
-    `y='${y}'`,
-    `borderw=${Math.max(0, style.strokeWidth)}`,
+    `x='${textX}'`,
+    `y='(h-text_h)/2'`,
+    `text_align=${alignment}`,
+    `text_shaping=1`,
+    `line_spacing=${lineSpacing}`,
+    `borderw=${Math.max(0, Math.round(style.strokeWidth * unitScale))}`,
     `bordercolor=${ffColor(style.strokeColor)}@0.92`,
     `shadowcolor=${ffColor(style.shadowColor)}@0.75`,
     `shadowx=0`,
-    `shadowy=${Math.max(0, Math.round(style.shadowBlur / 3))}`,
-    `alpha='${alphaExpression(clip, sequence.fps)}'`,
-    `enable='between(t,${start},${end})'`
+    `shadowy=${Math.max(0, Math.round((style.shadowBlur / 3) * unitScale))}`,
+    `alpha='${alphaExpression(clip, sequence.fps, localTime)}'`
   ];
-  return `[${input}]drawtext=${options.join(":")}[${output}]`;
+  const rotation = keyframeExpression(clip, "rotation", number(clip.transform.rotation), sequence.fps, localTime);
+  return [
+    `color=c=black@0.0:s=${sequence.width}x${sequence.height}:r=${sequence.fps}:d=${clip.duration},format=rgba[${source}]`,
+    `[${source}]drawtext=${options.join(":")}[${drawn}]`,
+    `[${drawn}]rotate='(${rotation})*PI/180':ow=iw:oh=ih:c=none,setpts=PTS+${start}/TB[${rotated}]`,
+    `[${input}][${rotated}]overlay=x='${x}':y='${y}':eval=frame:eof_action=pass:shortest=0:enable='between(t,${start},${end})'[${output}]`
+  ];
 }
 
-function shapeFilter(input: string, output: string, clip: ReelClip, sequence: ReelSequence): string {
+function shapeFilters(input: string, output: string, clip: ReelClip, sequence: ReelSequence, layerIndex: number): string[] {
   const shape = clip.shape;
-  if (!shape) return `[${input}]null[${output}]`;
+  if (!shape) return [`[${input}]null[${output}]`];
   const start = number(clip.timelineStart);
   const end = start + number(clip.duration, 0.1);
-  const width = Math.max(1, Math.round(shape.width * clip.transform.scale));
-  const height = Math.max(1, Math.round(shape.height * clip.transform.scale));
-  const x = `(w-${width})/2+(${keyframeExpression(clip, "x", clip.transform.x, sequence.fps)})`;
-  const y = `(h-${height})/2+(${keyframeExpression(clip, "y", clip.transform.y, sequence.fps)})`;
-  return `[${input}]drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=${ffColor(shape.color)}@${clip.transform.opacity}:t=fill:enable='between(t,${start},${end})'[${output}]`;
+  const localTime = `(t+${start})`;
+  const localAlphaTime = `(T+${start})`;
+  const width = Math.max(1, Math.round(shape.width));
+  const height = Math.max(1, Math.round(shape.height));
+  const x = `(W-w)/2+(${keyframeExpression(clip, "x", clip.transform.x, sequence.fps)})`;
+  const y = `(H-h)/2+(${keyframeExpression(clip, "y", clip.transform.y, sequence.fps)})`;
+  const scale = keyframeExpression(clip, "scale", Math.max(0.05, clip.transform.scale), sequence.fps, localTime);
+  const rotation = keyframeExpression(clip, "rotation", number(clip.transform.rotation), sequence.fps, localTime);
+  const opacity = alphaExpression(clip, sequence.fps, localAlphaTime);
+  const source = `shapesrc${layerIndex}`;
+  const scaled = `shapescale${layerIndex}`;
+  const rotated = `shaperot${layerIndex}`;
+  const alpha = `shapealpha${layerIndex}`;
+  return [
+    `color=c=${ffColor(shape.color)}:s=${width}x${height}:r=${sequence.fps}:d=${clip.duration},format=rgba[${source}]`,
+    `[${source}]scale=w='max(1\,iw*max(0.05\,(${scale})))':h='max(1\,ih*max(0.05\,(${scale})))':eval=frame:flags=lanczos[${scaled}]`,
+    `[${scaled}]rotate='(${rotation})*PI/180':ow='sqrt(iw*iw+ih*ih)':oh='sqrt(iw*iw+ih*ih)':c=none[${rotated}]`,
+    `[${rotated}]format=rgba,geq=r='r(X\,Y)':g='g(X\,Y)':b='b(X\,Y)':a='alpha(X\,Y)*max(0\,min(1\,(${opacity})))',setpts=PTS+${start}/TB[${alpha}]`,
+    `[${input}][${alpha}]overlay=x='${x}':y='${y}':eval=frame:eof_action=pass:shortest=0:enable='between(t,${start},${end})'[${output}]`
+  ];
 }
 
 function outputArgs(preset: RenderPreset, sequence: ReelSequence): string[] {
@@ -235,9 +267,9 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
       const y = `(H-h)/2+(${keyframeExpression(layer.clip, "y", layer.clip.transform.y, sequence.fps)})`;
       filters.push(`[${currentVideo}][${clipLabel}]overlay=x='${x}':y='${y}':eval=frame:eof_action=pass:shortest=0:enable='between(t,${layer.clip.timelineStart},${layer.clip.timelineStart + layer.clip.duration})'[${next}]`);
     } else if (layer.clip.kind === "text") {
-      filters.push(textFilter(currentVideo, next, layer.clip, sequence));
+      filters.push(...textFilters(currentVideo, next, layer.clip, sequence, layerIndex));
     } else if (layer.clip.kind === "shape") {
-      filters.push(shapeFilter(currentVideo, next, layer.clip, sequence));
+      filters.push(...shapeFilters(currentVideo, next, layer.clip, sequence, layerIndex));
     } else {
       continue;
     }

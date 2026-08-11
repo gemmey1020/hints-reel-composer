@@ -8,6 +8,35 @@ export type ClipKind = "media" | "text" | "shape";
 export type FitMode = "cover" | "contain";
 export type RenderPreset = "draft" | "review" | "delivery" | "archive" | "webm" | "gif" | "webp" | "png";
 export type Easing = "linear" | "ease-in" | "ease-out" | "ease-in-out";
+export type ParityState = "EXACT_PARITY_REQUIRED" | "BOUNDED_VISUAL_PARITY" | "EXPORT_AUTHORITATIVE" | "UNSUPPORTED_REMOVE_FROM_UI";
+
+export interface ParityContractEntry {
+  property: string;
+  state: ParityState;
+  note: string;
+}
+
+export const PARITY_CONTRACT: readonly ParityContractEntry[] = [
+  { property: "timing", state: "EXACT_PARITY_REQUIRED", note: "Timeline starts, durations, and frame boundaries share one Recipe clock." },
+  { property: "visibility", state: "EXACT_PARITY_REQUIRED", note: "Clip enabled and track visibility use the shared track contract." },
+  { property: "ordering", state: "EXACT_PARITY_REQUIRED", note: "Track order and clip order define both compositors." },
+  { property: "position", state: "EXACT_PARITY_REQUIRED", note: "Recipe pixel offsets are evaluated from the sequence center." },
+  { property: "scale", state: "EXACT_PARITY_REQUIRED", note: "Transform scale and scale keyframes use the same frame clock." },
+  { property: "rotation", state: "EXACT_PARITY_REQUIRED", note: "Rotation degrees and keyframes are applied around the layer center." },
+  { property: "opacity", state: "EXACT_PARITY_REQUIRED", note: "Opacity, opacity keyframes, and fades share the same timing rules." },
+  { property: "trim", state: "EXACT_PARITY_REQUIRED", note: "Media source-in, duration, and playback rate are compiler-authoritative and preview synchronized." },
+  { property: "fades", state: "EXACT_PARITY_REQUIRED", note: "Visual and audio fades are evaluated from clip-local time." },
+  { property: "keyframes", state: "EXACT_PARITY_REQUIRED", note: "Frame positions and easing are deterministic in preview and export." },
+  { property: "audio-state", state: "EXACT_PARITY_REQUIRED", note: "Mute, solo, gain, fades, and normalization use governed render semantics." },
+  { property: "ltr-text", state: "BOUNDED_VISUAL_PARITY", note: "Content, line breaks, alignment, and transforms match; browser and FFmpeg glyph rasterization may differ." },
+  { property: "rtl-text", state: "BOUNDED_VISUAL_PARITY", note: "Direction and shaping are explicit; browser and FFmpeg shaping engines may rasterize differently." },
+  { property: "multiline-text", state: "BOUNDED_VISUAL_PARITY", note: "Only explicit line breaks are supported so line structure remains deterministic." },
+  { property: "line-height", state: "BOUNDED_VISUAL_PARITY", note: "Both engines honor the Recipe ratio, with bounded font-metric differences." },
+  { property: "text-alignment", state: "BOUNDED_VISUAL_PARITY", note: "Left, center, and right alignment share an 88 percent title field." },
+  { property: "shape", state: "EXACT_PARITY_REQUIRED", note: "Geometry, color, transforms, opacity, fades, and keyframes are shared; no preview-only glow exists." },
+  { property: "tracking", state: "UNSUPPORTED_REMOVE_FROM_UI", note: "Local FFmpeg drawtext has no truthful glyph-tracking control in HRC Recipe v1." },
+  { property: "typography-rasterization", state: "EXPORT_AUTHORITATIVE", note: "Final FFmpeg output is the delivery authority for antialiasing and exact glyph pixels." }
+] as const;
 
 export interface Keyframe {
   id: string;
@@ -229,7 +258,9 @@ function validateTextStyle(value: unknown, path: string, errors: string[]): void
   if (![400, 500, 600, 700, 800].includes(value.fontWeight as number)) errors.push(`${path}.fontWeight is unsupported.`);
   requireFinite(value.fontSize, `${path}.fontSize`, errors, 8, 400);
   requireFinite(value.lineHeight, `${path}.lineHeight`, errors, 0.5, 4);
-  requireFinite(value.letterSpacing, `${path}.letterSpacing`, errors, -20, 100);
+  if (value.letterSpacing !== 0) {
+    errors.push(`${path}.letterSpacing must be 0 in HRC Recipe v1 because final FFmpeg export has no glyph-tracking control.`);
+  }
   requireColor(value.color, `${path}.color`, errors);
   requireEnum(value.align, new Set(["left", "center", "right"]), `${path}.align`, errors);
   requireEnum(value.direction, new Set(["ltr", "rtl"]), `${path}.direction`, errors);
@@ -343,7 +374,7 @@ export function createTextClip(trackId: string, timelineStart: number, duration 
       fontWeight: 700,
       fontSize: 62,
       lineHeight: 1.1,
-      letterSpacing: 1.4,
+      letterSpacing: 0,
       color: "#ffffff",
       align: "center",
       direction: "ltr",
