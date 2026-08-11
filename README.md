@@ -74,6 +74,9 @@ modify the experiment source folder.
 - Native FFmpeg draft, review, delivery, ProRes, WebM, palette GIF, animated WebP, and zipped PNG-sequence renders.
 - Hints Guide Mode with on-demand info markers, Arabic ghost cards, `?` toggle, and `Shift + Click` quick help outside the Timeline.
 - Governed Preview to Export parity contract with a local Chrome/FFmpeg/ImageMagick golden suite. See [`docs/PREVIEW_EXPORT_PARITY.md`](docs/PREVIEW_EXPORT_PARITY.md).
+- Governed headless API/CLI operations with durable bounded render jobs,
+  revision-safe saves, source-bound preview proxies, output retrieval, and
+  provenance bundles. See [`docs/HEADLESS_OPERATIONS.md`](docs/HEADLESS_OPERATIONS.md).
 
 The Preview is an operator surface. Final FFmpeg render is visibly identified
 as the delivery authority wherever bounded typography rasterization differences

@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useEffectEvent, useMemo, useRef, 
 import { createMediaClip, createTextClip, type MediaAsset, type ReelClip, type ReelProject, type ReelSequence, type ReelTrack } from "../../shared/project.ts";
 import { api } from "../lib/api.ts";
 import { activeSequence, cloneProject, getClip, mutateClipIfUnlocked } from "../lib/editor.ts";
+import { ProjectPersistenceQueue } from "../lib/projectPersistence.ts";
 
 interface HistoryState {
   past: ReelProject[];
@@ -58,6 +59,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const dirtyRevision = useRef(0);
   const savedRevision = useRef(0);
+  const persistence = useRef<ProjectPersistenceQueue | null>(null);
+  if (!persistence.current) persistence.current = new ProjectPersistenceQueue(0, api.saveProject);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +69,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         const projects = await api.listProjects();
         const project = projects.length > 0 ? await api.getProject(projects[0].id) : await api.createProject("Untitled Reel");
         if (cancelled) return;
+        persistence.current?.adoptRevision(project.revision);
         setHistory({ past: [], present: project, future: [] });
         setSaveState("saved");
       } catch (reason) {
@@ -85,7 +89,11 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const saveLatest = useEffectEvent(async (candidate: ReelProject, revision: number) => {
     try {
       setSaveState("saving");
-      await api.saveProject(candidate);
+      const saved = await persistence.current!.save(candidate);
+      setHistory((current) => current && current.present.id === saved.id ? {
+        ...current,
+        present: { ...current.present, revision: saved.revision, updatedAt: saved.updatedAt }
+      } : current);
       savedRevision.current = Math.max(savedRevision.current, revision);
       setSaveState(savedRevision.current >= dirtyRevision.current ? "saved" : "dirty");
     } catch (reason) {
@@ -282,9 +290,14 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     if (!project) return null;
     try {
       setSaveState("saving");
-      const saved = await api.saveProject(project);
-      savedRevision.current = dirtyRevision.current;
-      setSaveState("saved");
+      const revision = dirtyRevision.current;
+      const saved = await persistence.current!.save(project);
+      setHistory((current) => current && current.present.id === saved.id ? {
+        ...current,
+        present: { ...current.present, revision: saved.revision, updatedAt: saved.updatedAt }
+      } : current);
+      savedRevision.current = Math.max(savedRevision.current, revision);
+      setSaveState(savedRevision.current >= dirtyRevision.current ? "saved" : "dirty");
       return saved;
     } catch (reason) {
       setSaveState("error");
@@ -297,15 +310,26 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     if (!project || files.length === 0) return;
     try {
       setSaveState("saving");
-      await api.saveProject(project);
-      let latest = project;
+      const startingDirtyRevision = dirtyRevision.current;
+      let latest = await persistence.current!.save(project);
       for (const file of files) {
-        const result = await api.importMedia(latest.id, file);
-        latest = result.project;
+        let importedAsset: MediaAsset | undefined;
+        latest = await persistence.current!.mutate(async (revision) => {
+          const result = await api.importMedia(latest.id, file, "source-media", revision);
+          importedAsset = result.asset;
+          return result.project;
+        });
+        if (importedAsset?.kind === "video") {
+          const assetId = importedAsset.id;
+          latest = await persistence.current!.mutate(async (revision) => (await api.createProxy(latest.id, assetId, revision)).project);
+        }
       }
-      setHistory((current) => current ? { past: [...current.past, current.present], present: latest, future: [] } : current);
-      savedRevision.current = dirtyRevision.current;
-      setSaveState("saved");
+      setHistory((current) => current ? {
+        ...current,
+        present: { ...current.present, revision: latest.revision, updatedAt: latest.updatedAt, assets: latest.assets }
+      } : current);
+      savedRevision.current = Math.max(savedRevision.current, startingDirtyRevision);
+      setSaveState(savedRevision.current >= dirtyRevision.current ? "saved" : "dirty");
     } catch (reason) {
       setSaveState("error");
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -316,9 +340,17 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     if (!project) return;
     try {
       setSaveState("saving");
-      const imported = await api.importRecipe(project.id, recipe);
-      replaceProject(imported);
-      savedRevision.current = dirtyRevision.current;
+      const imported = await persistence.current!.mutate((revision) => api.importRecipe(project.id, { ...recipe, revision }));
+      setHistory((current) => current ? {
+        past: [...current.past.slice(-79), current.present],
+        present: imported,
+        future: []
+      } : current);
+      const acceptedRevision = dirtyRevision.current + 1;
+      dirtyRevision.current = acceptedRevision;
+      savedRevision.current = acceptedRevision;
+      setSelectedClipId(null);
+      setCurrentTimeState(0);
       setSaveState("saved");
     } catch (reason) {
       setSaveState("error");

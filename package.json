@@ -10,9 +10,11 @@
     "start": "NODE_ENV=production node server-dist/server/index.js",
     "test": "vitest run",
     "test:exports": "npm run test:render && node --import tsx scripts/smoke-export-formats.ts",
+    "test:headless": "node --import tsx scripts/verify-headless-operations.ts",
     "test:parity": "node --import tsx scripts/verify-preview-export-parity.ts",
     "test:render": "node --import tsx scripts/smoke-keyframe-render.ts",
     "test:watch": "vitest",
+    "hrc": "node --import tsx scripts/hrc.ts",
     "seed:golden": "node --import tsx scripts/seed-golden-reel.ts"
   },
   "dependencies": {

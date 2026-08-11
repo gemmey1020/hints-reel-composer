@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { Response } from "express";
 import type { MediaAsset, AssetKind, AssetRole } from "../shared/project.js";
 import { projectFile, resolveExistingProjectFile, resolveProjectWriteFile } from "./paths.js";
-import { readProject, writeProject } from "./projectStore.js";
+import { ProjectRevisionConflict, readProject, writeProject } from "./projectStore.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,6 +27,14 @@ interface ProbeStream {
 interface ProbeResult {
   format?: { duration?: string; format_name?: string };
   streams?: ProbeStream[];
+}
+
+interface ProxyMetadata {
+  schema: "hints-preview-proxy/v1";
+  assetId: string;
+  sourceHash: string;
+  fileName: string;
+  createdAt: string;
 }
 
 function safeStem(value: string): string {
@@ -113,7 +121,8 @@ export async function importUploadedMedia(
   temporaryPath: string,
   originalName: string,
   mime: string,
-  roleInput: unknown = "source-media"
+  roleInput: unknown = "source-media",
+  expectedRevision?: number
 ): Promise<MediaAsset> {
   let destination: string | undefined;
   let assetId: string | undefined;
@@ -127,6 +136,7 @@ export async function importUploadedMedia(
     if (uploadStats.size > maximumBytes) throw new MediaInputError(`Media upload exceeds the configured size limit of ${maximumBytes} bytes.`);
 
     const project = await readProject(projectId);
+    if (expectedRevision !== undefined && project.revision !== expectedRevision) throw new ProjectRevisionConflict();
     const hash = await sha256(temporaryPath);
     const duplicate = project.assets.find((asset) => asset.hash === hash);
     if (duplicate) {
@@ -182,28 +192,56 @@ export async function importUploadedMedia(
   }
 }
 
-export async function createProxy(projectId: string, assetId: string): Promise<{ proxyUrl: string }> {
+export async function createProxy(projectId: string, assetId: string, expectedRevision?: number): Promise<{ proxyUrl: string; proxySourceHash: string }> {
   const project = await readProject(projectId);
+  if (expectedRevision !== undefined && project.revision !== expectedRevision) throw new ProjectRevisionConflict();
   const asset = project.assets.find((candidate) => candidate.id === assetId);
   if (!asset || asset.kind !== "video") throw new Error("A video asset is required.");
   const proxyName = `${asset.id}-540p.mp4`;
   const proxyPath = await resolveProjectWriteFile(projectId, "proxies", proxyName);
+  const metadataPath = await resolveProjectWriteFile(projectId, "proxies", `${asset.id}-540p.json`);
   const sourcePath = await resolveExistingProjectFile(projectId, "media", asset.fileName);
   await execFileAsync("ffmpeg", [
     "-hide_banner", "-loglevel", "error", "-y", "-i", sourcePath,
-    "-vf", "scale=-2:960:flags=lanczos", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
+    "-vf", "scale=-2:'min(540,ih)':flags=lanczos", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
     "-an", "-movflags", "+faststart", proxyPath
   ], { maxBuffer: 16 * 1024 * 1024 });
-  return { proxyUrl: `/api/v1/projects/${projectId}/artifacts/proxies/${proxyName}` };
+  const metadata: ProxyMetadata = {
+    schema: "hints-preview-proxy/v1",
+    assetId: asset.id,
+    sourceHash: asset.hash,
+    fileName: proxyName,
+    createdAt: new Date().toISOString()
+  };
+  await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  asset.proxyUrl = `/api/v1/projects/${projectId}/assets/${asset.id}/proxy`;
+  asset.proxySourceHash = asset.hash;
+  await writeProject(project);
+  return { proxyUrl: asset.proxyUrl, proxySourceHash: asset.hash };
 }
 
-export async function streamAsset(projectId: string, assetId: string, requestRange: string | undefined, response: Response): Promise<void> {
+export async function resolvePreviewMedia(projectId: string, assetId: string): Promise<{ filePath: string; mime: string; usedProxy: boolean }> {
   const project = await readProject(projectId);
   const asset = project.assets.find((candidate) => candidate.id === assetId);
   if (!asset) throw new Error("Asset not found.");
-  const filePath = await resolveExistingProjectFile(projectId, "media", asset.fileName);
-  const stats = await fs.stat(filePath);
+  const sourcePath = await resolveExistingProjectFile(projectId, "media", asset.fileName);
   const mime = asset.kind === "video" ? "video/mp4" : asset.kind === "audio" ? "audio/wav" : "image/*";
+  if (asset.kind !== "video" || !asset.proxyUrl || asset.proxySourceHash !== asset.hash) return { filePath: sourcePath, mime, usedProxy: false };
+  try {
+    const metadataPath = await resolveExistingProjectFile(projectId, "proxies", `${asset.id}-540p.json`);
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8")) as ProxyMetadata;
+    if (metadata.schema !== "hints-preview-proxy/v1" || metadata.assetId !== asset.id || metadata.sourceHash !== asset.hash || metadata.fileName !== `${asset.id}-540p.mp4`) {
+      return { filePath: sourcePath, mime, usedProxy: false };
+    }
+    const proxyPath = await resolveExistingProjectFile(projectId, "proxies", metadata.fileName);
+    return { filePath: proxyPath, mime: "video/mp4", usedProxy: true };
+  } catch {
+    return { filePath: sourcePath, mime, usedProxy: false };
+  }
+}
+
+async function streamFile(filePath: string, mime: string, requestRange: string | undefined, response: Response): Promise<void> {
+  const stats = await fs.stat(filePath);
   if (!requestRange) {
     response.writeHead(200, { "Content-Length": stats.size, "Content-Type": mime, "Accept-Ranges": "bytes" });
     createReadStream(filePath).pipe(response);
@@ -223,6 +261,20 @@ export async function streamAsset(projectId: string, assetId: string, requestRan
     "Content-Type": mime
   });
   createReadStream(filePath, { start, end }).pipe(response);
+}
+
+export async function streamPreviewMedia(projectId: string, assetId: string, requestRange: string | undefined, response: Response): Promise<void> {
+  const resolved = await resolvePreviewMedia(projectId, assetId);
+  await streamFile(resolved.filePath, resolved.mime, requestRange, response);
+}
+
+export async function streamAsset(projectId: string, assetId: string, requestRange: string | undefined, response: Response): Promise<void> {
+  const project = await readProject(projectId);
+  const asset = project.assets.find((candidate) => candidate.id === assetId);
+  if (!asset) throw new Error("Asset not found.");
+  const filePath = await resolveExistingProjectFile(projectId, "media", asset.fileName);
+  const mime = asset.kind === "video" ? "video/mp4" : asset.kind === "audio" ? "audio/wav" : "image/*";
+  await streamFile(filePath, mime, requestRange, response);
 }
 
 export function parseByteRange(header: string | undefined, size: number): { start: number; end: number } | null {

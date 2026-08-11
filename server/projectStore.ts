@@ -4,6 +4,22 @@ import { createDefaultProject, type ReelProject, validateProject } from "../shar
 import { PROJECTS_ROOT, projectDir, projectFile, resolveExistingProjectFile, resolveProjectWriteFile } from "./paths.js";
 
 const PROJECT_FOLDERS = ["media", "proxies", "thumbnails", "waveforms", "autosaves", "renders", "qa", "logs"];
+const projectWriteQueues = new Map<string, Promise<unknown>>();
+
+export class ProjectRevisionConflict extends Error {
+  readonly statusCode = 409;
+
+  constructor(message = "Project revision conflict. Reload the latest project before saving again.") {
+    super(message);
+    this.name = "ProjectRevisionConflict";
+  }
+}
+
+function migrateProjectRevision(input: unknown): ReelProject {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input as ReelProject;
+  const project = input as ReelProject;
+  return project.revision === undefined ? { ...project, revision: 0 } : project;
+}
 
 async function ensureProjectFolders(projectId: string): Promise<void> {
   const root = projectDir(projectId);
@@ -18,7 +34,7 @@ export async function listProjects(): Promise<Array<Pick<ReelProject, "id" | "ti
     .map(async (entry) => {
       try {
         const raw = await fs.readFile(path.join(PROJECTS_ROOT, entry.name, "project.json"), "utf8");
-        const project = JSON.parse(raw) as ReelProject;
+        const project = migrateProjectRevision(JSON.parse(raw));
         const validation = validateProject(project);
         if (!validation.valid) throw new Error(validation.errors.join(" "));
         return { id: project.id, title: project.title, updatedAt: project.updatedAt, activeSequenceId: project.activeSequenceId };
@@ -40,17 +56,25 @@ export async function createProject(title?: string): Promise<ReelProject> {
 
 export async function readProject(projectId: string): Promise<ReelProject> {
   const raw = await fs.readFile(await resolveExistingProjectFile(projectId, "project.json"), "utf8");
-  const project = JSON.parse(raw) as ReelProject;
+  const project = migrateProjectRevision(JSON.parse(raw));
   const validation = validateProject(project);
   if (!validation.valid) throw new Error(`Invalid project: ${validation.errors.join(" ")}`);
   return project;
 }
 
-export async function writeProject(project: ReelProject, autosave = true): Promise<ReelProject> {
+async function writeProjectNow(projectInput: ReelProject, autosave: boolean): Promise<ReelProject> {
+  const project = migrateProjectRevision(projectInput);
   const validation = validateProject(project);
   if (!validation.valid) throw new Error(validation.errors.join("\n"));
   await ensureProjectFolders(project.id);
   const destination = await resolveProjectWriteFile(project.id, "project.json");
+  let current: ReelProject | null = null;
+  try {
+    current = migrateProjectRevision(JSON.parse(await fs.readFile(destination, "utf8")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (current && project.revision !== current.revision) throw new ProjectRevisionConflict();
   if (autosave) {
     try {
       const previous = await fs.readFile(destination, "utf8");
@@ -64,11 +88,22 @@ export async function writeProject(project: ReelProject, autosave = true): Promi
       }
     }
   }
-  const next = { ...project, updatedAt: new Date().toISOString() };
+  const next = { ...project, revision: current ? current.revision + 1 : 0, updatedAt: new Date().toISOString() };
   const temporary = `${destination}.tmp`;
   await fs.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
   await fs.rename(temporary, destination);
   return next;
+}
+
+export async function writeProject(project: ReelProject, autosave = true): Promise<ReelProject> {
+  const previous = projectWriteQueues.get(project.id) || Promise.resolve();
+  const operation = previous.catch(() => undefined).then(() => writeProjectNow(project, autosave));
+  projectWriteQueues.set(project.id, operation);
+  try {
+    return await operation;
+  } finally {
+    if (projectWriteQueues.get(project.id) === operation) projectWriteQueues.delete(project.id);
+  }
 }
 
 export async function importRecipe(projectId: string, incoming: unknown): Promise<ReelProject> {
@@ -84,6 +119,7 @@ export async function importRecipe(projectId: string, incoming: unknown): Promis
   }
   const imported: ReelProject = {
     ...recipe,
+    revision: current.revision,
     createdAt: current.createdAt,
     updatedAt: new Date().toISOString(),
     assets: current.assets.map((asset) => ({ ...asset }))

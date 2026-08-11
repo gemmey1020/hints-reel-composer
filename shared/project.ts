@@ -86,6 +86,8 @@ export interface MediaAsset {
   mediaUrl: string;
   thumbnailUrl?: string;
   waveformUrl?: string;
+  proxyUrl?: string;
+  proxySourceHash?: string;
   provenance?: string;
 }
 
@@ -148,6 +150,7 @@ export interface RenderSettings {
 
 export interface ReelProject {
   schemaVersion: typeof SCHEMA_VERSION;
+  revision: number;
   id: string;
   title: string;
   createdAt: string;
@@ -319,6 +322,7 @@ export function createDefaultProject(title = "Untitled Reel"): ReelProject {
   const sequences = (["9:16", "16:9", "1:1", "4:5"] as AspectRatio[]).map(makeSequence);
   return {
     schemaVersion: SCHEMA_VERSION,
+    revision: 0,
     id: crypto.randomUUID(),
     title,
     createdAt: now,
@@ -395,9 +399,10 @@ export function validateProject(input: unknown): ValidationResult {
   if (!isRecord(input)) return { valid: false, errors: ["Recipe must be a JSON object."] };
   const project = input;
   rejectUnknownKeys(project, [
-    "schemaVersion", "id", "title", "createdAt", "updatedAt", "activeSequenceId", "assets", "sequences", "renderSettings"
+    "schemaVersion", "revision", "id", "title", "createdAt", "updatedAt", "activeSequenceId", "assets", "sequences", "renderSettings"
   ], "project", errors);
   if (project.schemaVersion !== SCHEMA_VERSION) errors.push(`project.schemaVersion must be ${SCHEMA_VERSION}.`);
+  if (project.revision !== undefined) requireFinite(project.revision, "project.revision", errors, 0, Number.MAX_SAFE_INTEGER, true);
   const projectIdValid = requireString(project.id, "project.id", errors, 3, 128) && SAFE_ID.test(project.id as string);
   if (typeof project.id === "string" && !SAFE_ID.test(project.id)) errors.push("project.id must be a safe managed id.");
   requireString(project.title, "project.title", errors, 1, 160);
@@ -418,7 +423,7 @@ export function validateProject(input: unknown): ValidationResult {
       }
       rejectUnknownKeys(rawAsset, [
         "id", "name", "kind", "role", "fileName", "hash", "duration", "width", "height", "fps", "hasAudio",
-        "audioSampleRate", "createdAt", "mediaUrl", "thumbnailUrl", "waveformUrl", "provenance"
+        "audioSampleRate", "createdAt", "mediaUrl", "thumbnailUrl", "waveformUrl", "proxyUrl", "proxySourceHash", "provenance"
       ], path, errors);
       const idValid = requireString(rawAsset.id, `${path}.id`, errors, 1, 128) && SAFE_CHILD_ID.test(rawAsset.id as string);
       if (typeof rawAsset.id === "string" && !SAFE_CHILD_ID.test(rawAsset.id)) errors.push(`${path}.id must be a safe managed id.`);
@@ -453,6 +458,13 @@ export function validateProject(input: unknown): ValidationResult {
         if (rawAsset[optionalUrl] !== undefined && (typeof rawAsset[optionalUrl] !== "string" || !(rawAsset[optionalUrl] as string).startsWith(`/api/v1/projects/${projectId}/artifacts/`))) {
           errors.push(`${path}.${optionalUrl} must be a managed project artifact URL.`);
         }
+      }
+      if (rawAsset.proxyUrl !== undefined) {
+        const expectedProxyUrl = `/api/v1/projects/${projectId}/assets/${rawAsset.id as string}/proxy`;
+        if (rawAsset.proxyUrl !== expectedProxyUrl) errors.push(`${path}.proxyUrl must reference its managed preview proxy endpoint.`);
+      }
+      if (rawAsset.proxySourceHash !== undefined && (typeof rawAsset.proxySourceHash !== "string" || !SHA256.test(rawAsset.proxySourceHash))) {
+        errors.push(`${path}.proxySourceHash must be a lowercase SHA-256 value.`);
       }
       if (rawAsset.provenance !== undefined) requireString(rawAsset.provenance, `${path}.provenance`, errors, 1, 500);
     }

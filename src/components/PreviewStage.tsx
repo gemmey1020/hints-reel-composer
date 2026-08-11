@@ -19,7 +19,7 @@ function PreviewMedia({ asset, clip, time, playing }: { asset: MediaAsset; clip:
     else video.pause();
   }, [asset.kind, clip.playbackRate, playing, sourceTime]);
   if (asset.kind === "image") return <img src={asset.mediaUrl} alt="" draggable={false} />;
-  return <video ref={videoRef} src={asset.mediaUrl} muted playsInline preload="auto" />;
+  return <video ref={videoRef} src={asset.proxyUrl || asset.mediaUrl} muted playsInline preload="auto" />;
 }
 
 export function PreviewStage() {

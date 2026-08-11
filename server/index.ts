@@ -4,22 +4,35 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
-import { validateProject, type RenderPreset } from "../shared/project.js";
-import { createProxy, importUploadedMedia, streamAsset } from "./media.js";
+import { validateProject } from "../shared/project.js";
+import { createProxy, importUploadedMedia, streamAsset, streamPreviewMedia } from "./media.js";
 import { BRAND_FONT_ROOT, BRAND_LOGO_ROOT, COMPOSER_ROOT, UPLOAD_ROOT, assertSafeId, ensureRuntimeRoots, projectFile } from "./paths.js";
 import { createProject, importRecipe, listProjects, readProject, writeProject } from "./projectStore.js";
 import { RenderJobManager } from "./renderJobs.js";
+import { parseRenderRequest } from "./renderRequest.js";
 
 const execFileAsync = promisify(execFile);
 await ensureRuntimeRoots();
 
 const app = express();
 const renderJobs = new RenderJobManager();
+await renderJobs.initialize();
 const configuredUploadLimit = Number(process.env.HRC_MAX_IMPORT_BYTES || 8 * 1024 * 1024 * 1024);
 const maximumUploadBytes = Number.isFinite(configuredUploadLimit) && configuredUploadLimit > 0 ? configuredUploadLimit : 8 * 1024 * 1024 * 1024;
 const upload = multer({ dest: UPLOAD_ROOT, limits: { fileSize: maximumUploadBytes, files: 1 } });
 const port = Number(process.env.PORT || 8090);
 const host = "127.0.0.1";
+
+function optionalRevision(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const revision = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    const error = new Error("expectedRevision must be a non-negative integer.");
+    Object.assign(error, { statusCode: 400 });
+    throw error;
+  }
+  return revision;
+}
 
 app.disable("x-powered-by");
 app.use((request, response, next) => {
@@ -52,6 +65,11 @@ app.get("/api/v1/health", async (_request, response) => {
 
 app.get("/api/v1/projects", async (_request, response) => response.json(await listProjects()));
 
+app.post("/api/v1/validate", (request, response) => {
+  const validation = validateProject(request.body);
+  response.status(validation.valid ? 200 : 422).json(validation);
+});
+
 app.post("/api/v1/projects", async (request, response) => {
   const project = await createProject(typeof request.body?.title === "string" ? request.body.title : undefined);
   response.status(201).json(project);
@@ -83,17 +101,34 @@ app.get("/api/v1/projects/:projectId/export-recipe", async (request, response) =
 app.post("/api/v1/assets/import", upload.single("media"), async (request, response) => {
   if (!request.file) return response.status(400).json({ error: "Media file is required." });
   const projectId = assertSafeId(String(request.body.projectId || ""), "project id");
-  const asset = await importUploadedMedia(projectId, request.file.path, request.file.originalname, request.file.mimetype, request.body.role);
+  const asset = await importUploadedMedia(
+    projectId,
+    request.file.path,
+    request.file.originalname,
+    request.file.mimetype,
+    request.body.role,
+    optionalRevision(request.body.expectedRevision)
+  );
   response.status(201).json({ asset, project: await readProject(projectId) });
 });
 
 app.post("/api/v1/assets/:assetId/proxy", async (request, response) => {
   const projectId = assertSafeId(String(request.body.projectId || ""), "project id");
-  response.json(await createProxy(projectId, assertSafeId(request.params.assetId, "asset id")));
+  const proxy = await createProxy(projectId, assertSafeId(request.params.assetId, "asset id"), optionalRevision(request.body.expectedRevision));
+  response.json({ ...proxy, project: await readProject(projectId) });
 });
 
 app.get("/api/v1/projects/:projectId/assets/:assetId", async (request, response) => {
   await streamAsset(
+    assertSafeId(request.params.projectId, "project id"),
+    assertSafeId(request.params.assetId, "asset id"),
+    request.headers.range,
+    response
+  );
+});
+
+app.get("/api/v1/projects/:projectId/assets/:assetId/proxy", async (request, response) => {
+  await streamPreviewMedia(
     assertSafeId(request.params.projectId, "project id"),
     assertSafeId(request.params.assetId, "asset id"),
     request.headers.range,
@@ -108,28 +143,63 @@ app.get("/api/v1/projects/:projectId/artifacts/:folder/:fileName", async (reques
   const fileName = path.basename(request.params.fileName);
   const target = projectFile(projectId, request.params.folder, fileName);
   await fs.access(target);
-  response.sendFile(target);
+  response.sendFile(target, { dotfiles: "allow" });
 });
 
 app.post("/api/v1/renders", async (request, response) => {
-  const projectId = assertSafeId(String(request.body.projectId || ""), "project id");
-  const sequenceId = assertSafeId(String(request.body.sequenceId || ""), "sequence id");
-  const allowedPresets = new Set<RenderPreset>(["draft", "review", "delivery", "archive", "webm", "gif", "webp", "png"]);
-  const preset = request.body.preset as RenderPreset;
-  if (!allowedPresets.has(preset)) return response.status(400).json({ error: "Unsupported render preset." });
+  const { projectId, sequenceId, preset } = parseRenderRequest(request.body);
   response.status(202).json(await renderJobs.create(projectId, sequenceId, preset));
 });
 
+app.get("/api/v1/renders", (_request, response) => response.json(renderJobs.list()));
+
+app.get("/api/v1/renders/:jobId", (request, response) => {
+  const job = renderJobs.get(assertSafeId(request.params.jobId, "render job id"));
+  if (!job) return response.status(404).json({ error: "Render job not found." });
+  response.json(job);
+});
+
+app.post("/api/v1/renders/:jobId/retry", async (request, response) => {
+  response.status(202).json(await renderJobs.retry(assertSafeId(request.params.jobId, "render job id")));
+});
+
+app.get("/api/v1/renders/:jobId/output", (request, response) => {
+  const job = renderJobs.get(assertSafeId(request.params.jobId, "render job id"));
+  if (!job) return response.status(404).json({ error: "Render job not found." });
+  if (job.stage !== "complete" || !job.outputFileName) return response.status(409).json({ error: "Render output is not complete." });
+  const target = projectFile(job.projectId, "renders", path.basename(job.outputFileName));
+  response.download(target, path.basename(target), { dotfiles: "allow" });
+});
+
+app.get("/api/v1/renders/:jobId/provenance", (request, response) => {
+  const job = renderJobs.get(assertSafeId(request.params.jobId, "render job id"));
+  if (!job) return response.status(404).json({ error: "Render job not found." });
+  if (job.stage !== "complete" || !job.provenanceFileName) return response.status(409).json({ error: "Render provenance is not complete." });
+  const target = projectFile(job.projectId, "renders", path.basename(job.provenanceFileName));
+  response.download(target, path.basename(target), { dotfiles: "allow" });
+});
+
+async function qaResponse(jobId: string, response: Response): Promise<Response> {
+  const job = renderJobs.get(assertSafeId(jobId, "render job id"));
+  if (!job) return response.status(404).json({ error: "Render job not found." });
+  if (job.stage !== "complete") return response.status(409).json({ error: "Render QA is not complete.", job });
+  const reportPath = projectFile(job.projectId, "qa", job.id, "qa-report.json");
+  const report = JSON.parse(await fs.readFile(reportPath, "utf8"));
+  return response.json({ job, report, qaDirectory: projectFile(job.projectId, "qa", job.id) });
+}
+
 app.get("/api/v1/renders/:jobId/events", (request, response) => {
+  const jobId = assertSafeId(request.params.jobId, "render job id");
+  if (!renderJobs.get(jobId)) return response.status(404).json({ error: "Render job not found." });
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
   response.flushHeaders();
-  const unsubscribe = renderJobs.subscribe(assertSafeId(request.params.jobId, "render job id"), (job) => {
+  const unsubscribe = renderJobs.subscribe(jobId, (job) => {
     response.write(`data: ${JSON.stringify(job)}\n\n`);
     if (["complete", "failed", "cancelled"].includes(job.stage)) response.end();
   });
-  if (!unsubscribe) return response.status(404).end();
+  if (!unsubscribe) return response.end();
   request.on("close", unsubscribe);
 });
 
@@ -138,11 +208,8 @@ app.delete("/api/v1/renders/:jobId", (request, response) => {
   response.status(cancelled ? 202 : 404).json({ cancelled });
 });
 
-app.post("/api/v1/renders/:jobId/qa", (request, response) => {
-  const job = renderJobs.get(assertSafeId(request.params.jobId, "render job id"));
-  if (!job) return response.status(404).json({ error: "Render job not found." });
-  response.json({ job, qaPath: job.stage === "complete" ? `qa/${job.id}` : null });
-});
+app.get("/api/v1/renders/:jobId/qa", async (request, response) => qaResponse(request.params.jobId, response));
+app.post("/api/v1/renders/:jobId/qa", async (request, response) => qaResponse(request.params.jobId, response));
 
 if (process.env.NODE_ENV === "production") {
   app.use(express.static(path.join(COMPOSER_ROOT, "dist")));
