@@ -1,0 +1,11 @@
+node_modules/
+dist/
+server-dist/
+reel_projects/
+.render-tmp/
+coverage/
+*.tsbuildinfo
+*.log
+.env
+.env.*
+!.env.example

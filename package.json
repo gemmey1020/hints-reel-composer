@@ -1,0 +1,35 @@
+{
+  "name": "hints-reel-composer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development node --import tsx server/index.ts",
+    "clean": "node --import tsx scripts/build-governance.ts clean",
+    "build": "npm run clean && tsc --noEmit && vite build && tsc -p tsconfig.server.json && node --import tsx scripts/build-governance.ts assert",
+    "start": "NODE_ENV=production node server-dist/server/index.js",
+    "test": "vitest run",
+    "test:exports": "npm run test:render && node --import tsx scripts/smoke-export-formats.ts",
+    "test:render": "node --import tsx scripts/smoke-keyframe-render.ts",
+    "test:watch": "vitest",
+    "seed:golden": "node --import tsx scripts/seed-golden-reel.ts"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3",
+    "vitest": "^3.2.4"
+  }
+}
