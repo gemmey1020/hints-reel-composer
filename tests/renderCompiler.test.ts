@@ -41,4 +41,51 @@ describe("render graph compiler", () => {
     expect(expression).toContain("-240");
     expect(render.filterGraph).toContain(expression);
   });
+
+  it("emits managed UTF-8 text files for FFmpeg multiline text", () => {
+    const project = createDefaultProject("Multiline title");
+    const sequence = project.sequences[0];
+    const track = sequence.tracks.find((candidate) => candidate.kind === "graphics")!;
+    const title = createTextClip(track.id, 0, 2);
+    title.text = "ONE SIGNAL\nCONTROLLED CLEARLY";
+    track.clips.push(title);
+
+    const render = compileRender(project, sequence, "review", "multiline-title");
+
+    expect(render.filterGraph).toContain("textfile='");
+    expect(render.filterGraph).not.toContain("text='ONE SIGNAL");
+    expect(render.filterGraph.match(/drawtext=/g)).toHaveLength(2);
+    expect(render.textFiles.map((file) => file.content)).toEqual(["ONE SIGNAL", "CONTROLLED CLEARLY"]);
+    expect(render.textFiles.every((file) => file.path.includes("multiline-title-text-"))).toBe(true);
+  });
+
+  it("preserves blank-line spacing without materializing empty FFmpeg text files", () => {
+    const project = createDefaultProject("Multiline title with a blank line");
+    const sequence = project.sequences[0];
+    const track = sequence.tracks.find((candidate) => candidate.kind === "graphics")!;
+    const title = createTextClip(track.id, 0, 2);
+    title.text = "ONE SIGNAL\n\nCONTROLLED CLEARLY";
+    track.clips.push(title);
+
+    const render = compileRender(project, sequence, "review", "multiline-blank-line");
+
+    expect(render.filterGraph.match(/drawtext=/g)).toHaveLength(2);
+    expect(render.textFiles.map((file) => file.content)).toEqual(["ONE SIGNAL", "CONTROLLED CLEARLY"]);
+    expect(render.filterGraph).toContain("(3*");
+    expect(render.filterGraph).toContain("+2*");
+  });
+
+  it("renders an empty text clip as a transparent no-op without empty text files", () => {
+    const project = createDefaultProject("Empty title");
+    const sequence = project.sequences[0];
+    const track = sequence.tracks.find((candidate) => candidate.kind === "graphics")!;
+    const title = createTextClip(track.id, 0, 2);
+    title.text = "";
+    track.clips.push(title);
+
+    const render = compileRender(project, sequence, "review", "empty-title");
+
+    expect(render.filterGraph).not.toContain("drawtext=");
+    expect(render.textFiles).toEqual([]);
+  });
 });

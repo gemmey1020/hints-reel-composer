@@ -211,12 +211,14 @@ app.delete("/api/v1/renders/:jobId", (request, response) => {
 app.get("/api/v1/renders/:jobId/qa", async (request, response) => qaResponse(request.params.jobId, response));
 app.post("/api/v1/renders/:jobId/qa", async (request, response) => qaResponse(request.params.jobId, response));
 
+let closeFrontend = async (): Promise<void> => undefined;
 if (process.env.NODE_ENV === "production") {
   app.use(express.static(path.join(COMPOSER_ROOT, "dist")));
   app.get("/{*path}", (_request, response) => response.sendFile(path.join(COMPOSER_ROOT, "dist", "index.html")));
 } else {
   const { createServer } = await import("vite");
   const vite = await createServer({ root: COMPOSER_ROOT, server: { middlewareMode: true }, appType: "spa" });
+  closeFrontend = async () => { await vite.close(); };
   app.use(vite.middlewares);
 }
 
@@ -228,6 +230,21 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   if (!response.headersSent) response.status(status).json({ error: status === 500 ? "Internal Composer error." : message });
 });
 
-app.listen(port, host, () => {
+const server = app.listen(port, host, () => {
   console.log(`Hints Reel Composer running at http://${host}:${port}`);
 });
+
+let shutdownStarted = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  console.log(`Hints Reel Composer received ${signal}; stopping active work safely.`);
+  const httpClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+  await renderJobs.shutdown();
+  await closeFrontend();
+  await Promise.race([httpClosed, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+  process.exit(0);
+}
+
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));

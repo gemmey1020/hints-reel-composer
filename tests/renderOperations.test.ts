@@ -26,6 +26,13 @@ async function waitUntil(check: () => boolean, timeout = 2000): Promise<void> {
 }
 
 describe("durable bounded render operations", () => {
+  it("ignores non-finite FFmpeg progress values", async () => {
+    const { renderProgressFromFfmpeg } = await import("../server/renderJobs.ts");
+    expect(renderProgressFromFfmpeg("N/A", 18)).toBeNull();
+    expect(renderProgressFromFfmpeg("not-a-number", 18)).toBeNull();
+    expect(renderProgressFromFfmpeg("9000000", 18)).toBeCloseTo(0.48, 5);
+  });
+
   it("enforces the concurrency cap and persists public states", async () => {
     const { RenderJobManager } = await import("../server/renderJobs.ts");
     const releases: Array<() => void> = [];
@@ -136,5 +143,31 @@ describe("durable bounded render operations", () => {
     await manager.initialize();
     expect(manager.get("stale-job")).toBeUndefined();
     await expect(fs.access(path.join(stateRoot, "stale-job.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("shuts down active work without orphaning a running state", async () => {
+    const { RenderJobManager } = await import("../server/renderJobs.ts");
+    let aborted = false;
+    const manager = new RenderJobManager({
+      stateRoot: path.join(root, "jobs"),
+      executor: async (_job, context) => {
+        context.update({ stage: "rendering", progress: 0.25, message: "active" });
+        await new Promise<void>((resolve) => context.signal.addEventListener("abort", () => {
+          aborted = true;
+          resolve();
+        }, { once: true }));
+        context.update({ stage: "rendering", progress: 0.75, message: "late update after cancellation" });
+      }
+    });
+    await manager.initialize();
+    const job = await manager.create("project-one", "sequence-one", "draft");
+    await waitUntil(() => manager.get(job.id)?.stage === "rendering");
+
+    await manager.shutdown();
+
+    expect(aborted).toBe(true);
+    expect(manager.get(job.id)?.stage).toBe("cancelled");
+    const persisted = JSON.parse(await fs.readFile(path.join(root, "jobs", `${job.id}.json`), "utf8"));
+    expect(persisted.stage).toBe("cancelled");
   });
 });

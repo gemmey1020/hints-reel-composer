@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:exports": "npm run test:render && node --import tsx scripts/smoke-export-formats.ts",
     "test:headless": "node --import tsx scripts/verify-headless-operations.ts",
+    "test:production": "node --import tsx scripts/qualify-production.ts",
     "test:parity": "node --import tsx scripts/verify-preview-export-parity.ts",
     "test:render": "node --import tsx scripts/smoke-keyframe-render.ts",
     "test:watch": "vitest",

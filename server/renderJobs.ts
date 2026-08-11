@@ -6,7 +6,7 @@ import path from "node:path";
 import type { RenderPreset } from "../shared/project.js";
 import { PROJECTS_ROOT, projectFile } from "./paths.js";
 import { readProject } from "./projectStore.js";
-import { compileRender } from "./renderCompiler.js";
+import { compileRender, materializeRenderInputs } from "./renderCompiler.js";
 
 export type RenderStage = "queued" | "compiling" | "rendering" | "qa" | "complete" | "failed" | "cancelled";
 export type RenderFailureKind = "ENCODE_FAILURE" | "QA_EXTRACTION_FAILURE" | "TECHNICAL_QA_FAILURE" | "INTERRUPTED" | "OPERATION_FAILURE";
@@ -32,6 +32,12 @@ export function qaSamplePlan(duration: number, fps: number, frameCount?: number)
     const frame = Math.min(derivedCount - 1, Math.max(0, Math.round((derivedCount - 1) * ratio)));
     return { frame, timestamp: frame / safeFps };
   });
+}
+
+export function renderProgressFromFfmpeg(rawMicroseconds: string, duration: number): number | null {
+  const seconds = Number(rawMicroseconds) / 1_000_000;
+  if (!Number.isFinite(seconds) || !Number.isFinite(duration) || duration <= 0) return null;
+  return Math.min(0.92, Math.max(0.04, 0.04 + (seconds / duration) * 0.88));
 }
 
 export interface RenderJob {
@@ -85,7 +91,9 @@ export class RenderJobManager {
   private jobs = new Map<string, InternalJob>();
   private queue: string[] = [];
   private activeCount = 0;
+  private activeExecutions = new Set<Promise<void>>();
   private initialized = false;
+  private shuttingDown = false;
   private initialization?: Promise<void>;
   private persistence = new Map<string, Promise<void>>();
   private readonly stateRoot: string;
@@ -186,11 +194,13 @@ export class RenderJobManager {
 
   async create(projectId: string, sequenceId: string, preset: RenderPreset): Promise<RenderJob> {
     await this.initialize();
+    if (this.shuttingDown) throw new Error("Render manager is shutting down.");
     return this.enqueue({ projectId, sequenceId, preset, attempt: 1, maxAttempts: this.maxAttempts });
   }
 
   async retry(jobId: string): Promise<RenderJob> {
     await this.initialize();
+    if (this.shuttingDown) throw new Error("Render manager is shutting down.");
     const previous = this.jobs.get(jobId);
     if (!previous) throw new Error("Render job not found.");
     if (!TERMINAL_STAGES.has(previous.stage)) throw new Error("Only a terminal render job can be retried.");
@@ -234,9 +244,25 @@ export class RenderJobManager {
     const job = this.jobs.get(jobId);
     if (!job || TERMINAL_STAGES.has(job.stage)) return false;
     job.controller?.abort();
-    job.process?.kill("SIGTERM");
+    const activeProcess = job.process;
+    activeProcess?.kill("SIGTERM");
+    if (activeProcess) {
+      const forceStop = setTimeout(() => {
+        if (job.process === activeProcess && activeProcess.exitCode === null) activeProcess.kill("SIGKILL");
+      }, 1_500);
+      forceStop.unref();
+    }
     this.update(job, { stage: "cancelled", message: "Render cancelled", progress: job.progress });
     return true;
+  }
+
+  async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    for (const job of this.jobs.values()) {
+      if (!TERMINAL_STAGES.has(job.stage)) this.cancel(job.id);
+    }
+    await Promise.allSettled([...this.activeExecutions]);
+    await Promise.all([...this.persistence.values()].map((operation) => operation.catch(() => undefined)));
   }
 
   private publicJob(job: InternalJob): RenderJob {
@@ -245,6 +271,7 @@ export class RenderJobManager {
   }
 
   private update(job: InternalJob, patch: Partial<RenderJob>): void {
+    if (TERMINAL_STAGES.has(job.stage) && patch.stage !== job.stage) return;
     Object.assign(job, patch, { updatedAt: new Date().toISOString() });
     void this.persist(job);
     job.emitter.emit("update");
@@ -272,15 +299,17 @@ export class RenderJobManager {
   }
 
   private drain(): void {
-    while (this.activeCount < this.concurrency && this.queue.length > 0) {
+    while (!this.shuttingDown && this.activeCount < this.concurrency && this.queue.length > 0) {
       const jobId = this.queue.shift();
       const job = jobId ? this.jobs.get(jobId) : undefined;
       if (!job || job.stage !== "queued") continue;
       this.activeCount += 1;
-      void this.execute(job).finally(() => {
+      const execution = this.execute(job).finally(() => {
         this.activeCount -= 1;
+        this.activeExecutions.delete(execution);
         this.drain();
       });
+      this.activeExecutions.add(execution);
     }
   }
 
@@ -308,9 +337,15 @@ export class RenderJobManager {
     }
   }
 
+  private isCancelled(job: InternalJob): boolean {
+    return job.stage === "cancelled";
+  }
+
   private async runPipeline(job: InternalJob): Promise<void> {
+      if (this.isCancelled(job)) return;
       this.update(job, { stage: "compiling", progress: 0.02, message: "Compiling render graph", error: undefined, failureKind: undefined });
       const project = await readProject(job.projectId);
+      if (this.isCancelled(job)) return;
       const sequence = project.sequences.find((candidate) => candidate.id === job.sequenceId);
       if (!sequence) throw new Error("Sequence not found.");
       const safeTitle = project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "hints-reel";
@@ -320,19 +355,24 @@ export class RenderJobManager {
       await Promise.all([
         fs.writeFile(projectFile(job.projectId, "logs", `${job.id}-filtergraph.txt`), `${compilation.filterGraph}\n`, "utf8"),
         fs.writeFile(projectFile(job.projectId, "logs", `${job.id}-manifest.json`), `${JSON.stringify(compilation.manifest, null, 2)}\n`, "utf8"),
-        fs.writeFile(projectFile(job.projectId, "logs", `${job.id}-recipe.json`), `${JSON.stringify(project, null, 2)}\n`, "utf8")
+        fs.writeFile(projectFile(job.projectId, "logs", `${job.id}-recipe.json`), `${JSON.stringify(project, null, 2)}\n`, "utf8"),
+        materializeRenderInputs(compilation)
       ]);
+      if (this.isCancelled(job)) return;
       await fs.mkdir(path.dirname(compilation.outputPath), { recursive: true });
       this.update(job, { stage: "rendering", progress: 0.04, message: "Rendering with FFmpeg" });
+      if (this.isCancelled(job)) return;
       await this.spawnFfmpeg(job, compilation.args, sequence.duration);
-      if (job.stage === "cancelled") return;
+      if (this.isCancelled(job)) return;
       if (compilation.frameDirectory) {
         this.update(job, { stage: "rendering", progress: 0.92, message: "Packaging PNG sequence" });
         await this.packagePngSequence(job, compilation.frameDirectory, compilation.artifactPath);
       }
+      if (this.isCancelled(job)) return;
       this.update(job, { stage: "qa", progress: 0.94, message: "Running technical QA" });
       await this.runQa(job, compilation.artifactPath, sequence.duration, sequence.fps, compilation.frameDirectory);
-      const provenance = await this.packageProvenance(job);
+      if (this.isCancelled(job)) return;
+      const provenance = await this.packageProvenance(job, compilation.textFiles.map((textFile) => textFile.path));
       this.update(job, {
         stage: "complete",
         progress: 1,
@@ -344,7 +384,7 @@ export class RenderJobManager {
       });
   }
 
-  private async packageProvenance(job: InternalJob): Promise<string> {
+  private async packageProvenance(job: InternalJob, extraPaths: string[] = []): Promise<string> {
     const fileName = `${job.id}-provenance.zip`;
     const artifactPath = projectFile(job.projectId, "renders", fileName);
     const candidates = [
@@ -353,7 +393,8 @@ export class RenderJobManager {
       projectFile(job.projectId, "logs", `${job.id}-recipe.json`),
       projectFile(job.projectId, "logs", `${job.id}-ffmpeg.log`),
       projectFile(job.projectId, "qa", job.id, "qa-report.json"),
-      projectFile(job.projectId, "qa", job.id, "contact-sheet.jpg")
+      projectFile(job.projectId, "qa", job.id, "contact-sheet.jpg"),
+      ...extraPaths
     ];
     const existing: string[] = [];
     for (const candidate of candidates) {
@@ -404,8 +445,8 @@ export class RenderJobManager {
           const [key, rawValue] = line.split("=", 2);
           if (key === "out_time_us") {
             const seconds = Number(rawValue) / 1_000_000;
-            const progress = Math.min(0.92, 0.04 + (seconds / Math.max(0.1, duration)) * 0.88);
-            this.update(job, { progress, message: `Rendering ${seconds.toFixed(1)}s / ${duration.toFixed(1)}s` });
+            const progress = renderProgressFromFfmpeg(rawValue, duration);
+            if (progress !== null) this.update(job, { progress, message: `Rendering ${seconds.toFixed(1)}s / ${duration.toFixed(1)}s` });
           }
         }
       });

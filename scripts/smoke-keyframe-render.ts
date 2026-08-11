@@ -18,7 +18,7 @@ function run(tool: string, args: string[]): Promise<void> {
 
 const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "hrc-keyframe-smoke-"));
 process.env.HINTS_REEL_PROJECTS_DIR = temporaryRoot;
-const [{ compileRender }, { projectFile }] = await Promise.all([
+const [{ compileRender, materializeRenderInputs }, { projectFile }] = await Promise.all([
   import("../server/renderCompiler.ts"),
   import("../server/paths.ts")
 ]);
@@ -102,6 +102,7 @@ text.keyframes.opacity = [
   await fs.writeFile(projectFile(project.id, "project.json"), `${JSON.stringify(project, null, 2)}\n`, "utf8");
   const compilation = compileRender(project, sequence, "draft", "keyframe-smoke");
   await fs.writeFile(projectFile(project.id, "logs", "keyframe-smoke-filtergraph.txt"), `${compilation.filterGraph}\n`, "utf8");
+  await materializeRenderInputs(compilation);
   await run("ffmpeg", compilation.args);
   await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1", compilation.outputPath]);
   console.log(`Keyframe render smoke passed: ${path.relative(process.cwd(), compilation.outputPath)}`);

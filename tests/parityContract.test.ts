@@ -48,7 +48,8 @@ describe("Preview to Export parity contract", () => {
     const render = compileRender(project, sequence, "review", "typography-parity");
     expect(render.filterGraph).toContain("text_shaping=1");
     expect(render.filterGraph).toContain("text_align=R");
-    expect(render.filterGraph).toContain("line_spacing=");
+    expect(render.filterGraph).toContain("*1.35");
+    expect(render.filterGraph.match(/drawtext=/g)).toHaveLength(2);
     expect(render.filterGraph).toContain("rotate='");
     expect(render.filterGraph).toContain("overlay=x='");
   });

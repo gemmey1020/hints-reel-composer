@@ -122,7 +122,7 @@ function even(value: number): number {
 
 async function createFixture(root: string, ratio: AspectRatio): Promise<{ project: ReelProject; outputPath: string }> {
   process.env.HINTS_REEL_PROJECTS_DIR = root;
-  const [{ compileRender }] = await Promise.all([import("../server/renderCompiler.ts")]);
+  const [{ compileRender, materializeRenderInputs }] = await Promise.all([import("../server/renderCompiler.ts")]);
   const project = createDefaultProject(`Parity ${ratio}`);
   project.id = `parity-${ratio.replace(":", "x")}`;
   const sequence = project.sequences.find((candidate) => candidate.aspectRatio === ratio)!;
@@ -232,6 +232,7 @@ async function createFixture(root: string, ratio: AspectRatio): Promise<{ projec
   project.updatedAt = ratio === "9:16" ? "2026-08-11T00:00:00.000Z" : "2026-08-11T00:00:01.000Z";
   await fs.writeFile(path.join(projectRoot, "project.json"), `${JSON.stringify(project, null, 2)}\n`, "utf8");
   const compilation = compileRender(project, sequence, "draft", `parity-${ratio.replace(":", "x")}`);
+  await materializeRenderInputs(compilation);
   await run("ffmpeg", compilation.args);
   return { project, outputPath: compilation.outputPath };
 }

@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { isTrackActive, type MediaAsset, type ReelClip, type ReelProject, type ReelSequence, type RenderPreset } from "../shared/project.js";
 import { fontPath, projectFile } from "./paths.js";
@@ -5,6 +6,7 @@ import { fontPath, projectFile } from "./paths.js";
 export interface RenderCompilation {
   args: string[];
   filterGraph: string;
+  textFiles: Array<{ path: string; content: string }>;
   outputPath: string;
   artifactPath: string;
   outputFileName: string;
@@ -13,12 +15,24 @@ export interface RenderCompilation {
   manifest: Record<string, unknown>;
 }
 
+export async function materializeRenderInputs(compilation: RenderCompilation): Promise<void> {
+  await Promise.all(compilation.textFiles.map(async (textFile) => {
+    await fs.mkdir(path.dirname(textFile.path), { recursive: true });
+    await fs.writeFile(textFile.path, textFile.content, "utf8");
+  }));
+}
+
 interface IndexedClip {
   clip: ReelClip;
   asset: MediaAsset;
   inputIndex: number;
   trackKind: "video" | "audio" | "graphics";
   trackOrder: number;
+}
+
+interface TextLineInput {
+  path: string;
+  lineIndex: number;
 }
 
 const PRESET_EXTENSION: Record<RenderPreset, string> = {
@@ -41,8 +55,7 @@ function escapeDrawText(text: string): string {
     .replace(/\\/g, "\\\\")
     .replace(/'/g, "\\'")
     .replace(/:/g, "\\:")
-    .replace(/%/g, "\\%")
-    .replace(/\n/g, "\\n");
+    .replace(/%/g, "\\%");
 }
 
 function number(value: number, fallback = 0): number {
@@ -141,9 +154,18 @@ function videoFilter(indexed: IndexedClip, sequence: ReelSequence, label: string
   return `[${indexed.inputIndex}:v]${filters.join(",")}[${label}]`;
 }
 
-function textFilters(input: string, output: string, clip: ReelClip, sequence: ReelSequence, layerIndex: number): string[] {
+function textFilters(
+  input: string,
+  output: string,
+  clip: ReelClip,
+  sequence: ReelSequence,
+  layerIndex: number,
+  textLineInputs: TextLineInput[],
+  totalLineCount: number
+): string[] {
   const style = clip.textStyle;
   if (!style) return [`[${input}]null[${output}]`];
+  if (textLineInputs.length === 0) return [`[${input}]null[${output}]`];
   const start = number(clip.timelineStart);
   const end = start + number(clip.duration, 0.1);
   const localTime = `(t+${start})`;
@@ -154,35 +176,41 @@ function textFilters(input: string, output: string, clip: ReelClip, sequence: Re
   const titleMargin = Math.round(sequence.width * 0.06);
   const textX = style.align === "left" ? String(titleMargin) : style.align === "right" ? `w-${titleMargin}-text_w` : "(w-text_w)/2";
   const alignment = style.align === "left" ? "L" : style.align === "right" ? "R" : "C";
-  const lineSpacing = Math.round(baseSize * (style.lineHeight - 1));
   const unitScale = sequence.height / 1920;
   const source = `textsrc${layerIndex}`;
-  const drawn = `textdraw${layerIndex}`;
   const rotated = `textrot${layerIndex}`;
-  const options = [
-    `fontfile='${fontPath(style.fontFamily, style.fontWeight)}'`,
-    `text='${escapeDrawText(clip.text || "")}'`,
-    `fontcolor=${ffColor(style.color)}`,
-    `fontsize='${scaledSize}'`,
-    `x='${textX}'`,
-    `y='(h-text_h)/2'`,
-    `text_align=${alignment}`,
-    `text_shaping=1`,
-    `line_spacing=${lineSpacing}`,
-    `borderw=${Math.max(0, Math.round(style.strokeWidth * unitScale))}`,
-    `bordercolor=${ffColor(style.strokeColor)}@0.92`,
-    `shadowcolor=${ffColor(style.shadowColor)}@0.75`,
-    `shadowx=0`,
-    `shadowy=${Math.max(0, Math.round((style.shadowBlur / 3) * unitScale))}`,
-    `alpha='${alphaExpression(clip, sequence.fps, localTime)}'`
-  ];
+  const lineStep = `((${scaledSize})*${number(style.lineHeight, 1)})`;
+  const blockHeight = `(${Math.max(1, totalLineCount)}*${lineStep})`;
+  const filters = [`color=c=black@0.0:s=${sequence.width}x${sequence.height}:r=${sequence.fps}:d=${clip.duration},format=rgba[${source}]`];
+  let currentTextLayer = source;
+  textLineInputs.forEach((textLineInput, glyphRunIndex) => {
+    const { path: textFilePath, lineIndex } = textLineInput;
+    const drawn = `textdraw${layerIndex}_${glyphRunIndex}`;
+    const options = [
+      `fontfile='${fontPath(style.fontFamily, style.fontWeight)}'`,
+      `textfile='${escapeDrawText(textFilePath)}'`,
+      `fontcolor=${ffColor(style.color)}`,
+      `fontsize='${scaledSize}'`,
+      `x='${textX}'`,
+      `y='(h-${blockHeight})/2+${lineIndex}*${lineStep}'`,
+      `text_align=${alignment}`,
+      `text_shaping=1`,
+      `borderw=${Math.max(0, Math.round(style.strokeWidth * unitScale))}`,
+      `bordercolor=${ffColor(style.strokeColor)}@0.92`,
+      `shadowcolor=${ffColor(style.shadowColor)}@0.75`,
+      `shadowx=0`,
+      `shadowy=${Math.max(0, Math.round((style.shadowBlur / 3) * unitScale))}`,
+      `alpha='${alphaExpression(clip, sequence.fps, localTime)}'`
+    ];
+    filters.push(`[${currentTextLayer}]drawtext=${options.join(":")}[${drawn}]`);
+    currentTextLayer = drawn;
+  });
   const rotation = keyframeExpression(clip, "rotation", number(clip.transform.rotation), sequence.fps, localTime);
-  return [
-    `color=c=black@0.0:s=${sequence.width}x${sequence.height}:r=${sequence.fps}:d=${clip.duration},format=rgba[${source}]`,
-    `[${source}]drawtext=${options.join(":")}[${drawn}]`,
-    `[${drawn}]rotate='(${rotation})*PI/180':ow=iw:oh=ih:c=none,setpts=PTS+${start}/TB[${rotated}]`,
+  filters.push(
+    `[${currentTextLayer}]rotate='(${rotation})*PI/180':ow=iw:oh=ih:c=none,setpts=PTS+${start}/TB[${rotated}]`,
     `[${input}][${rotated}]overlay=x='${x}':y='${y}':eval=frame:eof_action=pass:shortest=0:enable='between(t,${start},${end})'[${output}]`
-  ];
+  );
+  return filters;
 }
 
 function shapeFilters(input: string, output: string, clip: ReelClip, sequence: ReelSequence, layerIndex: number): string[] {
@@ -233,6 +261,7 @@ function outputArgs(preset: RenderPreset, sequence: ReelSequence): string[] {
 export function compileRender(project: ReelProject, sequence: ReelSequence, preset: RenderPreset, outputStem: string): RenderCompilation {
   const inputArgs: string[] = [];
   const indexed: IndexedClip[] = [];
+  const textFiles: Array<{ path: string; content: string }> = [];
   const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
   const enabledTracks = sequence.tracks.filter((track) => isTrackActive(sequence, track, "visual") || isTrackActive(sequence, track, "audio"));
   for (const track of enabledTracks) {
@@ -267,7 +296,14 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
       const y = `(H-h)/2+(${keyframeExpression(layer.clip, "y", layer.clip.transform.y, sequence.fps)})`;
       filters.push(`[${currentVideo}][${clipLabel}]overlay=x='${x}':y='${y}':eval=frame:eof_action=pass:shortest=0:enable='between(t,${layer.clip.timelineStart},${layer.clip.timelineStart + layer.clip.duration})'[${next}]`);
     } else if (layer.clip.kind === "text") {
-      filters.push(...textFilters(currentVideo, next, layer.clip, sequence, layerIndex));
+      const textLines = (layer.clip.text || "").replace(/\r\n?/g, "\n").split("\n");
+      const textLineInputs = textLines.flatMap((content, lineIndex): TextLineInput[] => {
+        if (content.length === 0) return [];
+        const textFilePath = projectFile(project.id, "logs", `${outputStem}-text-${layerIndex}-${lineIndex + 1}-${layer.clip.id}.txt`);
+        textFiles.push({ path: textFilePath, content });
+        return [{ path: textFilePath, lineIndex }];
+      });
+      filters.push(...textFilters(currentVideo, next, layer.clip, sequence, layerIndex, textLineInputs, textLines.length));
     } else if (layer.clip.kind === "shape") {
       filters.push(...shapeFilters(currentVideo, next, layer.clip, sequence, layerIndex));
     } else {
@@ -334,6 +370,7 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
   return {
     args,
     filterGraph: filters.join(";\n"),
+    textFiles,
     outputPath,
     artifactPath,
     outputFileName,
@@ -351,6 +388,7 @@ export function compileRender(project: ReelProject, sequence: ReelSequence, pres
       fps: sequence.fps,
       duration: sequence.duration,
       clipCount: visualLayers.length,
+      textFileCount: textFiles.length,
       inputCount: indexed.length,
       tool: "ffmpeg"
     }

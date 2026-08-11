@@ -52,6 +52,9 @@ modify the experiment source folder.
 - Imported media is copied into `media/` and checksum protected.
 - `proxies/`, `thumbnails/`, and `waveforms/` are derived caches.
 - Every render retains the recipe, manifest, filter graph, FFmpeg log, and QA frames.
+- Text export uses managed UTF-8 line files and independent glyph runs for
+  multiline copy, so official Bomstad typography does not leak newline glyphs;
+  those text inputs are included in the provenance bundle.
 - QA writes a four-beat contact sheet, FFprobe metadata, audio loudness/true-peak evidence, and format-specific frame-count checks.
 - The local API binds to `127.0.0.1` and never accepts arbitrary shell commands.
 - Recipe validation is deep and fail-closed: unknown fields, unsafe IDs/files,
@@ -87,10 +90,24 @@ workspace. Reel Composer does not redraw or replace the logo system.
 
 ## V1 Boundary
 
-This release is the production-capable Golden Reel slice: project-safe media
-ingestion, visual timeline assembly, frame-accurate transforms and keyframes,
-editable typography, deterministic FFmpeg rendering, multi-ratio sequences,
-and delivery QA all work without a terminal after launch.
+Version `0.1.0` is now a production-qualified, provider-neutral local assembly
+and render engine. Project-safe media ingestion, strict HRC Recipe validation,
+visual timeline assembly, frame-accurate transforms and keyframes, editable
+multiline LTR/RTL typography, deterministic FFmpeg rendering, multi-ratio
+sequences, durable render jobs, provenance, and delivery QA have all passed a
+fresh headless production qualification. The GUI remains the human review and
+override surface; it is not required for the governed machine production path.
+
+Run the isolated qualification with:
+
+```bash
+npm run test:production
+```
+
+The qualification creates only fresh sandboxed projects, imports the approved
+already-rendered identity motion as ordinary managed media, produces review and
+delivery outputs plus an alternate ratio, exercises restart/retry behavior, and
+verifies that source media and Founder projects remain unchanged.
 
 Advanced finishing controls remain a deliberate next wave: editable masks and
 feathering, LUT/curves UI, speed ramps, full EQ/ducking controls, offline-media
