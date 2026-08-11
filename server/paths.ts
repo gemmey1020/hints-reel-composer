@@ -46,6 +46,27 @@ export function projectFile(projectId: string, ...parts: string[]): string {
   return assertInside(root, path.join(root, ...parts));
 }
 
+async function realProjectRoot(projectId: string): Promise<string> {
+  await fs.mkdir(PROJECTS_ROOT, { recursive: true });
+  const projectsRoot = await fs.realpath(PROJECTS_ROOT);
+  const root = await fs.realpath(projectDir(projectId));
+  return assertInside(projectsRoot, root);
+}
+
+export async function resolveExistingProjectFile(projectId: string, ...parts: string[]): Promise<string> {
+  const root = await realProjectRoot(projectId);
+  const candidate = await fs.realpath(projectFile(projectId, ...parts));
+  return assertInside(root, candidate);
+}
+
+export async function resolveProjectWriteFile(projectId: string, ...parts: string[]): Promise<string> {
+  const root = await realProjectRoot(projectId);
+  const candidate = projectFile(projectId, ...parts);
+  const parent = await fs.realpath(path.dirname(candidate));
+  assertInside(root, parent);
+  return assertInside(root, path.join(parent, path.basename(candidate)));
+}
+
 export function fontPath(family: string, weight = 700): string {
   if (family === "Hakira") {
     return path.join(BRAND_FONT_ROOT, "hakira", "otf", weight >= 700 ? "Hakira-Bold.otf" : "Hakira-Regular.otf");

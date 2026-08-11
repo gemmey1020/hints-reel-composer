@@ -6,13 +6,18 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Response } from "express";
 import type { MediaAsset, AssetKind } from "../shared/project.js";
-import { projectFile } from "./paths.js";
+import { projectFile, resolveExistingProjectFile, resolveProjectWriteFile } from "./paths.js";
 import { readProject, writeProject } from "./projectStore.js";
 
 const execFileAsync = promisify(execFile);
 
+export class MediaInputError extends Error {
+  readonly statusCode = 422;
+}
+
 interface ProbeStream {
   codec_type?: string;
+  codec_name?: string;
   width?: number;
   height?: number;
   r_frame_rate?: string;
@@ -20,26 +25,38 @@ interface ProbeStream {
 }
 
 interface ProbeResult {
-  format?: { duration?: string };
+  format?: { duration?: string; format_name?: string };
   streams?: ProbeStream[];
 }
 
-function safeFileName(value: string): string {
+function safeStem(value: string): string {
   const parsed = path.parse(value);
-  const stem = parsed.name.normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "media";
-  const extension = parsed.ext.toLowerCase().replace(/[^a-z0-9.]/g, "");
-  return `${stem.slice(0, 90)}${extension}`;
+  return parsed.name.normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "media";
 }
 
-function kindFromMime(mime: string, fileName: string): AssetKind {
-  if (mime.startsWith("video/")) return "video";
-  if (mime.startsWith("audio/")) return "audio";
-  if (mime.startsWith("image/")) return "image";
-  const extension = path.extname(fileName).toLowerCase();
-  if ([".mp4", ".webm", ".mov", ".mkv", ".m4v"].includes(extension)) return "video";
-  if ([".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg"].includes(extension)) return "audio";
-  if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) return "image";
-  throw new Error("Unsupported media type.");
+function kindFromProbe(metadata: ProbeResult): AssetKind {
+  const video = metadata.streams?.find((stream) => stream.codec_type === "video");
+  const audio = metadata.streams?.find((stream) => stream.codec_type === "audio");
+  const stillCodecs = new Set(["png", "mjpeg", "jpeg2000", "webp", "gif", "bmp", "tiff", "svg"]);
+  if (video && stillCodecs.has(video.codec_name || "") && !audio) return "image";
+  if (video) return "video";
+  if (audio) return "audio";
+  throw new MediaInputError("FFprobe did not find a supported audio, video, or image stream.");
+}
+
+function canonicalExtension(kind: AssetKind, metadata: ProbeResult, originalName: string): string {
+  const codec = metadata.streams?.find((stream) => stream.codec_type === "video")?.codec_name;
+  if (kind === "image") {
+    if (codec === "mjpeg" || codec === "jpeg2000") return ".jpg";
+    if (codec && ["png", "webp", "gif", "bmp", "tiff"].includes(codec)) return `.${codec}`;
+    return ".png";
+  }
+  const original = path.extname(originalName).toLowerCase();
+  const supported = kind === "video"
+    ? new Set([".mp4", ".webm", ".mov", ".mkv", ".m4v"])
+    : new Set([".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg"]);
+  if (supported.has(original)) return original;
+  return kind === "video" ? ".mp4" : ".wav";
 }
 
 function parseFrameRate(value?: string): number {
@@ -58,7 +75,7 @@ async function sha256(filePath: string): Promise<string> {
 async function probe(filePath: string): Promise<ProbeResult> {
   const { stdout } = await execFileAsync("ffprobe", [
     "-v", "error",
-    "-show_entries", "format=duration:stream=codec_type,width,height,r_frame_rate,sample_rate",
+    "-show_entries", "format=duration,format_name:stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate",
     "-of", "json",
     filePath
   ], { maxBuffer: 8 * 1024 * 1024 });
@@ -86,43 +103,69 @@ async function createPreviewArtifacts(projectId: string, asset: MediaAsset, file
 }
 
 export async function importUploadedMedia(projectId: string, temporaryPath: string, originalName: string, mime: string): Promise<MediaAsset> {
-  const project = await readProject(projectId);
-  const hash = await sha256(temporaryPath);
-  const duplicate = project.assets.find((asset) => asset.hash === hash);
-  if (duplicate) {
+  let destination: string | undefined;
+  let assetId: string | undefined;
+  try {
+    const uploadStats = await fs.lstat(temporaryPath);
+    if (uploadStats.isSymbolicLink()) throw new MediaInputError("Media upload cannot be a symbolic link.");
+    if (!uploadStats.isFile()) throw new MediaInputError("Media upload must be a regular file.");
+    const configuredLimit = Number(process.env.HRC_MAX_IMPORT_BYTES || 8 * 1024 * 1024 * 1024);
+    const maximumBytes = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 8 * 1024 * 1024 * 1024;
+    if (uploadStats.size > maximumBytes) throw new MediaInputError(`Media upload exceeds the configured size limit of ${maximumBytes} bytes.`);
+
+    const project = await readProject(projectId);
+    const hash = await sha256(temporaryPath);
+    const duplicate = project.assets.find((asset) => asset.hash === hash);
+    if (duplicate) {
+      await fs.unlink(temporaryPath);
+      return duplicate;
+    }
+
+    const metadata = await probe(temporaryPath).catch(() => {
+      throw new MediaInputError("FFprobe could not decode the uploaded file as supported media.");
+    });
+    const kind = kindFromProbe(metadata);
+    const video = metadata.streams?.find((stream) => stream.codec_type === "video");
+    const audio = metadata.streams?.find((stream) => stream.codec_type === "audio");
+    assetId = randomUUID();
+    const fileName = `${assetId}-${safeStem(originalName)}${canonicalExtension(kind, metadata, originalName)}`;
+    const managedDestination = await resolveProjectWriteFile(projectId, "media", fileName);
+    destination = managedDestination;
+    await fs.rename(temporaryPath, managedDestination).catch(async () => {
+      await fs.copyFile(temporaryPath, managedDestination);
+      await fs.unlink(temporaryPath);
+    });
+    const asset: MediaAsset = {
+      id: assetId,
+      name: path.parse(originalName).name.slice(0, 200) || "media",
+      kind,
+      fileName,
+      hash,
+      duration: Number(metadata.format?.duration || (kind === "image" ? 4 : 0)),
+      width: Number(video?.width || 0),
+      height: Number(video?.height || 0),
+      fps: parseFrameRate(video?.r_frame_rate),
+      hasAudio: Boolean(audio),
+      audioSampleRate: audio?.sample_rate ? Number(audio.sample_rate) : undefined,
+      createdAt: new Date().toISOString(),
+      mediaUrl: `/api/v1/projects/${projectId}/assets/${assetId}`,
+      provenance: mime ? `upload-mime-hint:${mime}` : "upload-mime-hint:unknown"
+    };
+    await createPreviewArtifacts(projectId, asset, managedDestination);
+    project.assets.push(asset);
+    await writeProject(project);
+    return asset;
+  } catch (error) {
     await fs.unlink(temporaryPath).catch(() => undefined);
-    return duplicate;
+    if (destination) await fs.unlink(destination).catch(() => undefined);
+    if (assetId) {
+      await Promise.all([
+        fs.unlink(projectFile(projectId, "thumbnails", `${assetId}.jpg`)).catch(() => undefined),
+        fs.unlink(projectFile(projectId, "waveforms", `${assetId}.png`)).catch(() => undefined)
+      ]);
+    }
+    throw error;
   }
-  const kind = kindFromMime(mime, originalName);
-  const id = randomUUID();
-  const fileName = `${id}-${safeFileName(originalName)}`;
-  const destination = projectFile(projectId, "media", fileName);
-  await fs.rename(temporaryPath, destination).catch(async () => {
-    await fs.copyFile(temporaryPath, destination);
-    await fs.unlink(temporaryPath);
-  });
-  const metadata = await probe(destination);
-  const video = metadata.streams?.find((stream) => stream.codec_type === "video");
-  const audio = metadata.streams?.find((stream) => stream.codec_type === "audio");
-  const asset: MediaAsset = {
-    id,
-    name: path.parse(originalName).name,
-    kind,
-    fileName,
-    hash,
-    duration: Number(metadata.format?.duration || (kind === "image" ? 4 : 0)),
-    width: Number(video?.width || 0),
-    height: Number(video?.height || 0),
-    fps: parseFrameRate(video?.r_frame_rate),
-    hasAudio: Boolean(audio),
-    audioSampleRate: audio?.sample_rate ? Number(audio.sample_rate) : undefined,
-    createdAt: new Date().toISOString(),
-    mediaUrl: `/api/v1/projects/${projectId}/assets/${id}`
-  };
-  await createPreviewArtifacts(projectId, asset, destination);
-  project.assets.push(asset);
-  await writeProject(project);
-  return asset;
 }
 
 export async function createProxy(projectId: string, assetId: string): Promise<{ proxyUrl: string }> {
@@ -130,9 +173,10 @@ export async function createProxy(projectId: string, assetId: string): Promise<{
   const asset = project.assets.find((candidate) => candidate.id === assetId);
   if (!asset || asset.kind !== "video") throw new Error("A video asset is required.");
   const proxyName = `${asset.id}-540p.mp4`;
-  const proxyPath = projectFile(projectId, "proxies", proxyName);
+  const proxyPath = await resolveProjectWriteFile(projectId, "proxies", proxyName);
+  const sourcePath = await resolveExistingProjectFile(projectId, "media", asset.fileName);
   await execFileAsync("ffmpeg", [
-    "-hide_banner", "-loglevel", "error", "-y", "-i", projectFile(projectId, "media", asset.fileName),
+    "-hide_banner", "-loglevel", "error", "-y", "-i", sourcePath,
     "-vf", "scale=-2:960:flags=lanczos", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
     "-an", "-movflags", "+faststart", proxyPath
   ], { maxBuffer: 16 * 1024 * 1024 });
@@ -143,7 +187,7 @@ export async function streamAsset(projectId: string, assetId: string, requestRan
   const project = await readProject(projectId);
   const asset = project.assets.find((candidate) => candidate.id === assetId);
   if (!asset) throw new Error("Asset not found.");
-  const filePath = projectFile(projectId, "media", asset.fileName);
+  const filePath = await resolveExistingProjectFile(projectId, "media", asset.fileName);
   const stats = await fs.stat(filePath);
   const mime = asset.kind === "video" ? "video/mp4" : asset.kind === "audio" ? "audio/wav" : "image/*";
   if (!requestRange) {
@@ -151,13 +195,13 @@ export async function streamAsset(projectId: string, assetId: string, requestRan
     createReadStream(filePath).pipe(response);
     return;
   }
-  const match = /bytes=(\d+)-(\d*)/.exec(requestRange);
-  if (!match) {
+  const range = parseByteRange(requestRange, stats.size);
+  if (!range) {
+    response.setHeader("Content-Range", `bytes */${stats.size}`);
     response.status(416).end();
     return;
   }
-  const start = Number(match[1]);
-  const end = match[2] ? Number(match[2]) : stats.size - 1;
+  const { start, end } = range;
   response.writeHead(206, {
     "Content-Range": `bytes ${start}-${end}/${stats.size}`,
     "Accept-Ranges": "bytes",
@@ -165,4 +209,19 @@ export async function streamAsset(projectId: string, assetId: string, requestRan
     "Content-Type": mime
   });
   createReadStream(filePath, { start, end }).pipe(response);
+}
+
+export function parseByteRange(header: string | undefined, size: number): { start: number; end: number } | null {
+  if (!header || !Number.isSafeInteger(size) || size <= 0 || header.includes(",")) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match || (!match[1] && !match[2])) return null;
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(match[1]);
+  const requestedEnd = match[2] ? Number(match[2]) : size - 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start < 0 || start >= size || requestedEnd < start) return null;
+  return { start, end: Math.min(size - 1, requestedEnd) };
 }

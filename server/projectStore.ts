@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createDefaultProject, type ReelProject, validateProject } from "../shared/project.js";
-import { PROJECTS_ROOT, projectDir, projectFile } from "./paths.js";
+import { PROJECTS_ROOT, projectDir, projectFile, resolveExistingProjectFile, resolveProjectWriteFile } from "./paths.js";
 
 const PROJECT_FOLDERS = ["media", "proxies", "thumbnails", "waveforms", "autosaves", "renders", "qa", "logs"];
 
@@ -19,8 +19,11 @@ export async function listProjects(): Promise<Array<Pick<ReelProject, "id" | "ti
       try {
         const raw = await fs.readFile(path.join(PROJECTS_ROOT, entry.name, "project.json"), "utf8");
         const project = JSON.parse(raw) as ReelProject;
+        const validation = validateProject(project);
+        if (!validation.valid) throw new Error(validation.errors.join(" "));
         return { id: project.id, title: project.title, updatedAt: project.updatedAt, activeSequenceId: project.activeSequenceId };
-      } catch {
+      } catch (error) {
+        console.warn(`[HRC_PROJECT_DIAGNOSTIC] ${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
         return null;
       }
     }));
@@ -36,7 +39,7 @@ export async function createProject(title?: string): Promise<ReelProject> {
 }
 
 export async function readProject(projectId: string): Promise<ReelProject> {
-  const raw = await fs.readFile(projectFile(projectId, "project.json"), "utf8");
+  const raw = await fs.readFile(await resolveExistingProjectFile(projectId, "project.json"), "utf8");
   const project = JSON.parse(raw) as ReelProject;
   const validation = validateProject(project);
   if (!validation.valid) throw new Error(`Invalid project: ${validation.errors.join(" ")}`);
@@ -47,7 +50,7 @@ export async function writeProject(project: ReelProject, autosave = true): Promi
   const validation = validateProject(project);
   if (!validation.valid) throw new Error(validation.errors.join("\n"));
   await ensureProjectFolders(project.id);
-  const destination = projectFile(project.id, "project.json");
+  const destination = await resolveProjectWriteFile(project.id, "project.json");
   if (autosave) {
     try {
       const previous = await fs.readFile(destination, "utf8");
@@ -55,8 +58,10 @@ export async function writeProject(project: ReelProject, autosave = true): Promi
       await fs.writeFile(projectFile(project.id, "autosaves", autosaveName), previous, "utf8");
       const autosaves = (await fs.readdir(projectFile(project.id, "autosaves"))).sort().reverse();
       await Promise.all(autosaves.slice(12).map((file) => fs.unlink(projectFile(project.id, "autosaves", file))));
-    } catch {
-      // The first save has no prior snapshot.
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn(`[HRC_AUTOSAVE_DIAGNOSTIC] ${project.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
   const next = { ...project, updatedAt: new Date().toISOString() };
@@ -71,12 +76,17 @@ export async function importRecipe(projectId: string, incoming: unknown): Promis
   if (!validation.valid) throw new Error(validation.errors.join("\n"));
   const current = await readProject(projectId);
   const recipe = incoming as ReelProject;
+  if (recipe.id !== current.id) throw new Error("Recipe project id must match the target managed project.");
+  const currentAssets = current.assets.map(({ id, hash, fileName }) => ({ id, hash, fileName }));
+  const incomingAssets = recipe.assets.map(({ id, hash, fileName }) => ({ id, hash, fileName }));
+  if (JSON.stringify(incomingAssets) !== JSON.stringify(currentAssets)) {
+    throw new Error("Recipe assets must match the target project's managed asset inventory. Import media through the asset API first.");
+  }
   const imported: ReelProject = {
     ...recipe,
-    id: current.id,
     createdAt: current.createdAt,
     updatedAt: new Date().toISOString(),
-    assets: recipe.assets.map((asset) => ({ ...asset }))
+    assets: current.assets.map((asset) => ({ ...asset }))
   };
   return writeProject(imported);
 }

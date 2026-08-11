@@ -1,10 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createDefaultProject, createMediaClip, createTextClip, type MediaAsset } from "../shared/project.ts";
-import { compileRender } from "../server/renderCompiler.ts";
-import { projectFile } from "../server/paths.ts";
 
 function run(tool: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -17,30 +16,38 @@ function run(tool: string, args: string[]): Promise<void> {
   });
 }
 
-const project = createDefaultProject("QA Keyframe Smoke");
-project.id = "qa-keyframe-smoke";
-project.updatedAt = "1970-01-01T00:00:00.000Z";
-project.sequences = [project.sequences[0]];
-const sequence = project.sequences[0];
-sequence.width = 360;
-sequence.height = 640;
-sequence.duration = 2;
-sequence.fps = 30;
-project.activeSequenceId = sequence.id;
+const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "hrc-keyframe-smoke-"));
+process.env.HINTS_REEL_PROJECTS_DIR = temporaryRoot;
+const [{ compileRender }, { projectFile }] = await Promise.all([
+  import("../server/renderCompiler.ts"),
+  import("../server/paths.ts")
+]);
 
-for (const folder of ["media", "proxies", "autosaves", "renders", "qa", "logs", "thumbnails", "waveforms"]) {
-  await fs.mkdir(projectFile(project.id, folder), { recursive: true });
-}
+try {
+  const project = createDefaultProject("QA Keyframe Smoke");
+  project.id = "qa-keyframe-smoke";
+  project.updatedAt = "1970-01-01T00:00:00.000Z";
+  project.sequences = [project.sequences[0]];
+  const sequence = project.sequences[0];
+  sequence.width = 360;
+  sequence.height = 640;
+  sequence.duration = 2;
+  sequence.fps = 30;
+  project.activeSequenceId = sequence.id;
 
-const sourceFileName = "keyframe-source.mp4";
-const sourcePath = projectFile(project.id, "media", sourceFileName);
-await run("ffmpeg", [
+  for (const folder of ["media", "proxies", "autosaves", "renders", "qa", "logs", "thumbnails", "waveforms"]) {
+    await fs.mkdir(projectFile(project.id, folder), { recursive: true });
+  }
+
+  const sourceFileName = "keyframe-source.mp4";
+  const sourcePath = projectFile(project.id, "media", sourceFileName);
+  await run("ffmpeg", [
   "-hide_banner", "-loglevel", "error", "-y",
   "-f", "lavfi", "-i", "testsrc2=s=180x320:r=30:d=2",
   "-c:v", "libx264", "-pix_fmt", "yuv420p", sourcePath
-]);
-const sourceBytes = await fs.readFile(sourcePath);
-const asset: MediaAsset = {
+  ]);
+  const sourceBytes = await fs.readFile(sourcePath);
+  const asset: MediaAsset = {
   id: "qa-keyframe-asset",
   name: "Keyframe source",
   kind: "video",
@@ -52,12 +59,12 @@ const asset: MediaAsset = {
   fps: 30,
   hasAudio: false,
   createdAt: new Date().toISOString(),
-  mediaUrl: ""
-};
-project.assets.push(asset);
+    mediaUrl: `/api/v1/projects/${project.id}/assets/qa-keyframe-asset`
+  };
+  project.assets.push(asset);
 
-const videoTrack = sequence.tracks.find((track) => track.kind === "video")!;
-const media = createMediaClip(asset, videoTrack.id, 0);
+  const videoTrack = sequence.tracks.find((track) => track.kind === "video")!;
+  const media = createMediaClip(asset, videoTrack.id, 0);
 media.duration = 2;
 media.transform.scale = 0.72;
 media.keyframes.x = [
@@ -76,10 +83,10 @@ media.keyframes.opacity = [
   { id: "mo0", frame: 0, value: 0.2, easing: "linear" },
   { id: "mo1", frame: 20, value: 1, easing: "ease-out" }
 ];
-videoTrack.clips.push(media);
+  videoTrack.clips.push(media);
 
-const graphicsTrack = sequence.tracks.find((track) => track.kind === "graphics")!;
-const text = createTextClip(graphicsTrack.id, 0.15, 1.7);
+  const graphicsTrack = sequence.tracks.find((track) => track.kind === "graphics")!;
+  const text = createTextClip(graphicsTrack.id, 0.15, 1.7);
 text.text = "FRAME PARITY";
 text.textStyle!.fontSize = 48;
 text.keyframes.y = [
@@ -90,11 +97,14 @@ text.keyframes.opacity = [
   { id: "to0", frame: 0, value: 0, easing: "linear" },
   { id: "to1", frame: 12, value: 1, easing: "ease-out" }
 ];
-graphicsTrack.clips.push(text);
+  graphicsTrack.clips.push(text);
 
-await fs.writeFile(projectFile(project.id, "project.json"), `${JSON.stringify(project, null, 2)}\n`, "utf8");
-const compilation = compileRender(project, sequence, "draft", "keyframe-smoke");
-await fs.writeFile(projectFile(project.id, "logs", "keyframe-smoke-filtergraph.txt"), `${compilation.filterGraph}\n`, "utf8");
-await run("ffmpeg", compilation.args);
-await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1", compilation.outputPath]);
-console.log(`Keyframe render smoke passed: ${path.relative(process.cwd(), compilation.outputPath)}`);
+  await fs.writeFile(projectFile(project.id, "project.json"), `${JSON.stringify(project, null, 2)}\n`, "utf8");
+  const compilation = compileRender(project, sequence, "draft", "keyframe-smoke");
+  await fs.writeFile(projectFile(project.id, "logs", "keyframe-smoke-filtergraph.txt"), `${compilation.filterGraph}\n`, "utf8");
+  await run("ffmpeg", compilation.args);
+  await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1", compilation.outputPath]);
+  console.log(`Keyframe render smoke passed: ${path.relative(process.cwd(), compilation.outputPath)}`);
+} finally {
+  await fs.rm(temporaryRoot, { recursive: true, force: true });
+}

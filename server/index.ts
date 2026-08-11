@@ -15,7 +15,9 @@ await ensureRuntimeRoots();
 
 const app = express();
 const renderJobs = new RenderJobManager();
-const upload = multer({ dest: UPLOAD_ROOT, limits: { fileSize: 8 * 1024 * 1024 * 1024 } });
+const configuredUploadLimit = Number(process.env.HRC_MAX_IMPORT_BYTES || 8 * 1024 * 1024 * 1024);
+const maximumUploadBytes = Number.isFinite(configuredUploadLimit) && configuredUploadLimit > 0 ? configuredUploadLimit : 8 * 1024 * 1024 * 1024;
+const upload = multer({ dest: UPLOAD_ROOT, limits: { fileSize: maximumUploadBytes, files: 1 } });
 const port = Number(process.env.PORT || 8090);
 const host = "127.0.0.1";
 
@@ -27,7 +29,7 @@ app.use((request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   next();
 });
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: process.env.HRC_JSON_LIMIT || "25mb" }));
 app.use("/brand-assets/fonts", express.static(BRAND_FONT_ROOT, { immutable: true, maxAge: "1d" }));
 app.use("/brand-assets/logo", express.static(BRAND_LOGO_ROOT, { immutable: true, maxAge: "1d" }));
 app.get("/favicon.ico", (_request, response) => response.status(204).end());
@@ -154,7 +156,9 @@ if (process.env.NODE_ENV === "production") {
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);
-  if (!response.headersSent) response.status(500).json({ error: message });
+  const candidateStatus = typeof error === "object" && error && "statusCode" in error ? Number(error.statusCode) : 500;
+  const status = Number.isInteger(candidateStatus) && candidateStatus >= 400 && candidateStatus < 500 ? candidateStatus : 500;
+  if (!response.headersSent) response.status(status).json({ error: status === 500 ? "Internal Composer error." : message });
 });
 
 app.listen(port, host, () => {

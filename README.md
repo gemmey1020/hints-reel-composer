@@ -54,6 +54,15 @@ modify the experiment source folder.
 - Every render retains the recipe, manifest, filter graph, FFmpeg log, and QA frames.
 - QA writes a four-beat contact sheet, FFprobe metadata, audio loudness/true-peak evidence, and format-specific frame-count checks.
 - The local API binds to `127.0.0.1` and never accepts arbitrary shell commands.
+- Recipe validation is deep and fail-closed: unknown fields, unsafe IDs/files,
+  malformed timing, non-finite values, unsupported controls, and dangling
+  references are rejected before apply or render.
+- Recipe apply cannot invent managed assets or silently change project identity;
+  media must enter through the asset-import contract first.
+- FFprobe, not upload MIME or extension, is the media-type authority. Failed
+  imports roll back temporary and managed files transactionally.
+- Upload limits are configurable with `HRC_MAX_IMPORT_BYTES`; JSON body limits
+  are configurable with `HRC_JSON_LIMIT`.
 
 ## Current Editing Surface
 
