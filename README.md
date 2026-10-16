@@ -18,6 +18,10 @@ The application is designed for local operation. It binds to `127.0.0.1`, does n
 
 See [`docs/HEADLESS_OPERATIONS.md`](docs/HEADLESS_OPERATIONS.md) and [`docs/PREVIEW_EXPORT_PARITY.md`](docs/PREVIEW_EXPORT_PARITY.md) for the operation contracts.
 
+## Architecture
+
+The React timeline edits a versioned Recipe through an Express API. Shared validation and render compilation feed a local FFmpeg job pipeline; project revisions prevent stale writes, render state is persisted locally, and QA/provenance artifacts are available through the same API. Preview communicates the editing state, while final FFmpeg output is authoritative for delivery.
+
 ## Requirements
 
 - Node.js and npm
@@ -41,6 +45,21 @@ npm run hrc -- health --json
 ```
 
 To store projects elsewhere, set `HINTS_REEL_PROJECTS_DIR` before starting the server. Generated projects, uploads, renders, and runtime data are local and should not be committed.
+
+## Verification
+
+Verified from a clean staging clone on 2026-10-16:
+
+- `npm test`: 64 tests passed across 15 files.
+- `npm run build`: passed; Vite reports canonical Hints font assets unresolved because those files are intentionally supplied outside this repository.
+- `npm run test:headless`: passed with an isolated synthetic project, local server, render, QA, provenance, and restart checks.
+- `npm run test:exports`: passed the keyframe render smoke and all eight export presets.
+
+The dedicated production qualification and preview/export parity runners were not executed in this clone because they require official Hints identity/font assets that are not included. These checks are not claimed as passed.
+
+## Limitations
+
+The app uses operator-supplied canonical font assets. Browser and FFmpeg text rasterization can differ within the documented parity contract. No full production qualification result is claimed by this curation.
 
 ## License
 

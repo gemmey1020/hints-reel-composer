@@ -8,7 +8,7 @@ import { cleanBuildOutputs, findBuildPolicyViolations } from "../scripts/build-g
 import { fontPath } from "../server/paths.ts";
 
 const composerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const repositoryRoot = path.resolve(composerRoot, "../..");
+const repositoryRoot = composerRoot;
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
@@ -21,11 +21,11 @@ function gitIgnored(relativePath: string): boolean {
 
 describe("Composer source governance", () => {
   it("tracks source inputs while excluding runtime and generated state", () => {
-    expect(gitIgnored("hints_brand_studio/reel_composer/src/App.tsx")).toBe(false);
-    expect(gitIgnored("hints_brand_studio/reel_composer/package-lock.json")).toBe(false);
-    expect(gitIgnored("hints_brand_studio/reel_composer/reel_projects/example.hintsreel/project.json")).toBe(true);
-    expect(gitIgnored("hints_brand_studio/reel_composer/server-dist/server/index.js")).toBe(true);
-    expect(gitIgnored("hints_brand_studio/reel_composer/.render-tmp/upload.bin")).toBe(true);
+    expect(gitIgnored("src/App.tsx")).toBe(false);
+    expect(gitIgnored("package-lock.json")).toBe(false);
+    expect(gitIgnored("reel_projects/example.hintsreel/project.json")).toBe(true);
+    expect(gitIgnored("server-dist/server/index.js")).toBe(true);
+    expect(gitIgnored(".render-tmp/upload.bin")).toBe(true);
   });
 
   it("cleans build outputs and detects packaged runtime state", async () => {
